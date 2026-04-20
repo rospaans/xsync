@@ -1,0 +1,23 @@
+# xsync configuration
+# The local path is auto-detected as the directory containing this file.
+
+# Remote destination: local path (e.g. mounted volume) or ssh target
+remote = "/Volumes/your-volume/your-project/"
+# remote = "user@host:/path/to/project/"
+
+# Patterns to exclude from sync (rsync exclude-from syntax)
+exclude = [
+    ".git/",
+    ".venv/",
+    "__pycache__/",
+    "*.pyc",
+    ".DS_Store",
+    ".ipynb_checkpoints/",
+    "*.egg-info/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    "node_modules/",
+    "data/",
+    "outputs/",
+    "logs/",
+]

@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""
+xsync: small rsync wrapper for local-to-remote project sync.
+Reads .xsync.toml from the project root (current dir or any parent).
+
+Usage:
+    xsync                      # sync entire project
+    xsync path/to/file.py      # sync a single file
+    xsync --init               # create a starter .xsync.toml in current dir
+    xsync --dry-run            # show what would be synced, no transfer
+    xsync file.py --dry-run    # dry-run single-file mode
+"""
+
+import sys
+import subprocess
+import tomllib
+from pathlib import Path
+from datetime import datetime
+
+STARTER_CONFIG = """\
+# xsync configuration
+# The local path is auto-detected as the directory containing this file.
+
+# Remote destination: local path (e.g. mounted volume) or ssh target
+remote = "/Volumes/your-volume/your-project/"
+# remote = "user@host:/path/to/project/"
+
+# Patterns to exclude from sync (rsync exclude-from syntax)
+exclude = [
+    ".git/",
+    ".venv/",
+    "__pycache__/",
+    "*.pyc",
+    ".DS_Store",
+    ".ipynb_checkpoints/",
+    "*.egg-info/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    "node_modules/",
+    "data/",
+    "outputs/",
+    "logs/",
+    ".xsync.toml",
+    ".xsync.exclude",
+]
+"""
+
+
+def find_config(start: Path) -> tuple[Path, dict] | None:
+    """Walk up from start, looking for .xsync.toml. Returns (repo_root, config)."""
+    for directory in [start, *start.parents]:
+        config_path = directory / ".xsync.toml"
+        if config_path.exists():
+            with open(config_path, "rb") as f:
+                return directory, tomllib.load(f)
+    return None
+
+
+def write_exclude_file(repo_root: Path, patterns: list[str]) -> Path:
+    """Write exclude patterns to a temp file rsync can consume."""
+    exclude_path = repo_root / ".xsync.exclude"
+    exclude_path.write_text("\n".join(patterns) + "\n")
+    return exclude_path
+
+
+def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool) -> int:
+    """Sync entire repo to remote."""
+    cmd = [
+        "rsync",
+        "-avz",
+        "--delete",
+        f"--exclude-from={exclude_file}",
+        str(repo_root) + "/",
+        remote,
+    ]
+    if dry_run:
+        cmd.insert(1, "--dry-run")
+    return subprocess.run(cmd).returncode
+
+
+def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool) -> int:
+    """Sync a single file, preserving its relative path in the remote."""
+    rel = file_path.resolve().relative_to(repo_root)
+    dest = remote.rstrip("/") + "/" + str(rel.parent) + "/"
+    cmd = [
+        "rsync",
+        "-avz",
+        str(file_path.resolve()),
+        dest,
+    ]
+    if dry_run:
+        cmd.insert(1, "--dry-run")
+    return subprocess.run(cmd).returncode
+
+
+def cmd_init():
+    """Scaffold a starter .xsync.toml in the current directory."""
+    target = Path.cwd() / ".xsync.toml"
+    if target.exists():
+        print(f"Already exists: {target}")
+        sys.exit(1)
+    target.write_text(STARTER_CONFIG)
+    print(f"Created {target}")
+    print("Edit the 'remote' field to point to your destination.")
+
+
+def main():
+    args = sys.argv[1:]
+
+    if "--init" in args:
+        cmd_init()
+        return
+
+    dry_run = "--dry-run" in args
+    positional = [a for a in args if not a.startswith("--")]
+    file_arg = positional[0] if positional else None
+
+    result = find_config(Path.cwd())
+    if result is None:
+        print("❌ No .xsync.toml found in current directory or any parent.")
+        print("   Run `xsync --init` to create one here.")
+        sys.exit(1)
+
+    repo_root, config = result
+    remote = config.get("remote")
+    if not remote:
+        print("❌ 'remote' not set in .xsync.toml.")
+        sys.exit(1)
+
+    exclude_patterns = config.get("exclude", [])
+
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    mode = "DRY RUN " if dry_run else ""
+
+    if file_arg:
+        file_path = Path(file_arg)
+        try:
+            file_path.resolve().relative_to(repo_root)
+        except ValueError:
+            print(f"❌ File is outside repo: {file_path}")
+            sys.exit(1)
+        print(f"[{timestamp}] {mode}Syncing {file_arg} → {remote}")
+        rc = sync_file(file_path, repo_root, remote, dry_run)
+    else:
+        exclude_file = write_exclude_file(repo_root, exclude_patterns)
+        print(f"[{timestamp}] {mode}Syncing {repo_root}/ → {remote}")
+        rc = sync_full(repo_root, remote, exclude_file, dry_run)
+        exclude_file.unlink(missing_ok=True)
+
+    if rc == 0:
+        print(f"[{timestamp}] ✅ Done.")
+    else:
+        print(f"[{timestamp}] ⚠️  rsync exited with code {rc}.")
+        sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()
