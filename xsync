@@ -9,11 +9,16 @@ Usage:
     xsync --init               # create a starter .xsync.toml in current dir
     xsync --dry-run            # show what would be synced, no transfer
     xsync file.py --dry-run    # dry-run single-file mode
+    xsync --watch              # watch for changes and sync automatically
+    xsync --watch --interval 5 # watch with a 5-second debounce window
 """
 
 import sys
 import subprocess
 import tomllib
+import fnmatch
+import threading
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -42,6 +47,7 @@ exclude = [
     "logs/",
     ".xsync.toml",
     ".xsync.exclude",
+    ".xsync.files",
 ]
 """
 
@@ -93,6 +99,147 @@ def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool) -> i
     return subprocess.run(cmd).returncode
 
 
+def sync_batch(batch: list[str], repo_root: Path, remote: str) -> int:
+    """Sync a batch of relative file paths using rsync --files-from."""
+    files_from = repo_root / ".xsync.files"
+    files_from.write_text("\n".join(batch) + "\n")
+    cmd = [
+        "rsync",
+        "-avz",
+        "--files-from", str(files_from),
+        str(repo_root) + "/",
+        remote,
+    ]
+    rc = subprocess.run(cmd).returncode
+    files_from.unlink(missing_ok=True)
+    return rc
+
+
+INTERNAL_FILES = {".xsync.files", ".xsync.exclude"}
+
+
+def make_excluded_checker(repo_root: Path, patterns: list[str]):
+    """Return a function that tests whether a resolved path should be excluded."""
+    def is_excluded(abs_path: str) -> bool:
+        try:
+            rel = Path(abs_path).relative_to(repo_root)
+        except ValueError:
+            return True
+        if rel.name in INTERNAL_FILES:
+            return True
+        parts = rel.parts
+        for pattern in patterns:
+            stripped = pattern.rstrip("/")
+            is_dir_pattern = pattern.endswith("/")
+            # Match filename against pattern
+            if fnmatch.fnmatch(rel.name, stripped):
+                return True
+            # Match any path component against directory patterns
+            if is_dir_pattern:
+                for part in parts[:-1]:
+                    if fnmatch.fnmatch(part, stripped):
+                        return True
+            # Match full relative path
+            if fnmatch.fnmatch(str(rel), pattern):
+                return True
+        return False
+    return is_excluded
+
+
+def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float):
+    try:
+        from watchdog.observers import Observer
+        from watchdog.events import FileSystemEventHandler
+    except ImportError:
+        print("❌ watchdog is not installed. Run: pip install watchdog")
+        sys.exit(1)
+
+    is_excluded = make_excluded_checker(repo_root, exclude_patterns)
+    pending: set[str] = set()
+    has_deletions = threading.Event()
+    lock = threading.Lock()
+
+    class Handler(FileSystemEventHandler):
+        def _handle(self, abs_path: str):
+            if is_excluded(abs_path):
+                return
+            try:
+                rel = str(Path(abs_path).relative_to(repo_root))
+            except ValueError:
+                return
+            with lock:
+                pending.add(rel)
+
+        def on_modified(self, event):
+            if not event.is_directory:
+                self._handle(event.src_path)
+
+        def on_created(self, event):
+            if not event.is_directory:
+                self._handle(event.src_path)
+
+        def on_moved(self, event):
+            if not event.is_directory:
+                # src is gone on remote side; dest needs to be pushed
+                self._handle(event.dest_path)
+                has_deletions.set()
+
+        def on_deleted(self, event):
+            if is_excluded(event.src_path):
+                return
+            with lock:
+                pending.discard(str(Path(event.src_path).relative_to(repo_root)) if Path(event.src_path).is_relative_to(repo_root) else "")
+            has_deletions.set()
+
+    observer = Observer()
+    observer.schedule(Handler(), str(repo_root), recursive=True)
+    observer.start()
+
+    exclude_file = write_exclude_file(repo_root, exclude_patterns)
+
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] Initial sync {repo_root}/ → {remote}")
+    rc = sync_full(repo_root, remote, exclude_file, dry_run=False)
+    if rc != 0:
+        print(f"[{timestamp}] ⚠️  Initial sync failed with code {rc}. Continuing watch anyway.")
+    else:
+        print(f"[{timestamp}] ✅ Remote is up to date.")
+
+    print(f"Watching {repo_root}/ → {remote}  (debounce {debounce}s, Ctrl+C to stop)")
+
+    try:
+        while True:
+            time.sleep(debounce)
+            with lock:
+                batch = list(pending)
+                pending.clear()
+            deletion = has_deletions.is_set()
+            has_deletions.clear()
+
+            if not batch and not deletion:
+                continue
+
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            if deletion:
+                # Full sync needed so rsync --delete can remove the file on the remote
+                print(f"[{timestamp}] Deletion detected — running full sync")
+                rc = sync_full(repo_root, remote, exclude_file, dry_run=False)
+            else:
+                print(f"[{timestamp}] Syncing {len(batch)} file(s): {', '.join(batch)}")
+                rc = sync_batch(batch, repo_root, remote)
+
+            if rc == 0:
+                print(f"[{timestamp}] ✅ Done.")
+            else:
+                print(f"[{timestamp}] ⚠️  rsync exited with code {rc}.")
+    except KeyboardInterrupt:
+        observer.stop()
+        print("\nStopped.")
+    finally:
+        exclude_file.unlink(missing_ok=True)
+    observer.join()
+
+
 def cmd_init():
     """Scaffold a starter .xsync.toml in the current directory."""
     target = Path.cwd() / ".xsync.toml"
@@ -104,6 +251,15 @@ def cmd_init():
     print("Edit the 'remote' field to point to your destination.")
 
 
+def parse_flag_value(args: list[str], flag: str, default):
+    """Return the value after --flag if present, else default."""
+    if flag in args:
+        idx = args.index(flag)
+        if idx + 1 < len(args):
+            return args[idx + 1]
+    return default
+
+
 def main():
     args = sys.argv[1:]
 
@@ -111,6 +267,7 @@ def main():
         cmd_init()
         return
 
+    watch = "--watch" in args
     dry_run = "--dry-run" in args
     positional = [a for a in args if not a.startswith("--")]
     file_arg = positional[0] if positional else None
@@ -128,6 +285,12 @@ def main():
         sys.exit(1)
 
     exclude_patterns = config.get("exclude", [])
+
+    if watch:
+        raw_interval = parse_flag_value(args, "--interval", None)
+        debounce = float(raw_interval) if raw_interval is not None else 2.0
+        cmd_watch(repo_root, remote, exclude_patterns, debounce)
+        return
 
     timestamp = datetime.now().strftime("%H:%M:%S")
     mode = "DRY RUN " if dry_run else ""

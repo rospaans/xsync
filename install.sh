@@ -31,9 +31,18 @@ if [[ "$PY_MAJOR" -lt 3 || ( "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 11 ) ]]; then
     exit 1
 fi
 
+# Install watchdog for --watch mode
+if "$PYTHON" -c "import watchdog" 2>/dev/null; then
+    echo "✅ watchdog already installed."
+else
+    echo "Installing watchdog (required for --watch mode)..."
+    "$PYTHON" -m pip install --quiet watchdog
+    echo "✅ watchdog installed."
+fi
+
 # Copy and make executable
 cp "$(dirname "$0")/$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
 chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 
 echo "✅ Installed xsync to $INSTALL_DIR/$SCRIPT_NAME"
-echo "   Run 'xsync --help' or 'xsync --init' in a project directory to get started."
+echo "   Run 'xsync --init' to set up a project, or 'xsync --watch' to start watching."
