@@ -2,6 +2,7 @@
 set -e
 
 INSTALL_DIR="$HOME/.local/bin"
+VENV_DIR="$HOME/.local/share/xsync/venv"
 SCRIPT_NAME="xsync"
 
 # Ensure install dir exists and is on PATH
@@ -15,33 +16,54 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     echo "Restart your shell or run: source $SHELL_RC"
 fi
 
-# Check Python version (need 3.11+ for tomllib)
-PYTHON=$(command -v python3 || true)
+# Find Python 3.11+
+PYTHON=""
+for candidate in python3.14 python3.13 python3.12 python3.11; do
+    if command -v "$candidate" &>/dev/null; then
+        PYTHON=$(command -v "$candidate")
+        break
+    fi
+done
+
 if [[ -z "$PYTHON" ]]; then
-    echo "❌ python3 not found. Install Python 3.11+ and try again."
+    _py=$(command -v python3 || true)
+    if [[ -n "$_py" ]]; then
+        _minor=$("$_py" -c 'import sys; print(sys.version_info.minor)')
+        _major=$("$_py" -c 'import sys; print(sys.version_info.major)')
+        if [[ "$_major" -eq 3 && "$_minor" -ge 11 ]]; then
+            PYTHON="$_py"
+        fi
+    fi
+fi
+
+if [[ -z "$PYTHON" ]]; then
+    echo "❌ Python 3.11+ not found. Install it (e.g. brew install python@3.13) and try again."
     exit 1
 fi
 
 PY_VERSION=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PY_MINOR=$("$PYTHON" -c 'import sys; print(sys.version_info.minor)')
-PY_MAJOR=$("$PYTHON" -c 'import sys; print(sys.version_info.major)')
+echo "Using $PYTHON ($PY_VERSION)"
 
-if [[ "$PY_MAJOR" -lt 3 || ( "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 11 ) ]]; then
-    echo "❌ Python 3.11+ required (found $PY_VERSION). tomllib is only in stdlib from 3.11."
-    exit 1
+# Create a dedicated venv so we can install watchdog without touching system Python
+mkdir -p "$(dirname "$VENV_DIR")"
+if [[ ! -d "$VENV_DIR" ]]; then
+    echo "Creating venv at $VENV_DIR..."
+    "$PYTHON" -m venv "$VENV_DIR"
 fi
 
-# Install watchdog for --watch mode
-if "$PYTHON" -c "import watchdog" 2>/dev/null; then
+VENV_PYTHON="$VENV_DIR/bin/python3"
+
+# Install watchdog into the venv
+if "$VENV_PYTHON" -c "import watchdog" 2>/dev/null; then
     echo "✅ watchdog already installed."
 else
-    echo "Installing watchdog (required for --watch mode)..."
-    "$PYTHON" -m pip install --quiet watchdog
+    echo "Installing watchdog..."
+    "$VENV_PYTHON" -m pip install --quiet watchdog
     echo "✅ watchdog installed."
 fi
 
-# Copy and make executable
-cp "$(dirname "$0")/$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
+# Bake the venv's Python path into the shebang
+sed "1s|.*|#!${VENV_PYTHON}|" "$(dirname "$0")/$SCRIPT_NAME" > "$INSTALL_DIR/$SCRIPT_NAME"
 chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 
 echo "✅ Installed xsync to $INSTALL_DIR/$SCRIPT_NAME"
