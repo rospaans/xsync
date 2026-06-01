@@ -118,6 +118,24 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str) -> int:
 INTERNAL_FILES = {".xsync.files", ".xsync.exclude"}
 
 
+def is_ssh_remote(remote: str) -> bool:
+    if remote.startswith("/") or remote.startswith("~/") or remote.startswith("./"):
+        return False
+    return ":" in remote
+
+
+def delete_from_remote(deleted_rels: list[str], remote: str):
+    """Delete specific files from remote without a full rsync scan."""
+    if is_ssh_remote(remote):
+        host, remote_base = remote.split(":", 1)
+        targets = [remote_base.rstrip("/") + "/" + r for r in deleted_rels]
+        subprocess.run(["ssh", host, "rm -f " + " ".join(f"'{t}'" for t in targets)])
+    else:
+        for rel in deleted_rels:
+            target = Path(remote.rstrip("/")) / rel
+            target.unlink(missing_ok=True)
+
+
 def make_excluded_checker(repo_root: Path, patterns: list[str]):
     """Return a function that tests whether a resolved path should be excluded."""
     def is_excluded(abs_path: str) -> bool:
@@ -156,7 +174,7 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
 
     is_excluded = make_excluded_checker(repo_root, exclude_patterns)
     pending: set[str] = set()
-    has_deletions = threading.Event()
+    deleted: set[str] = set()
     lock = threading.Lock()
 
     class Handler(FileSystemEventHandler):
@@ -180,16 +198,27 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
 
         def on_moved(self, event):
             if not event.is_directory:
-                # src is gone on remote side; dest needs to be pushed
+                # src is gone on remote; dest needs to be pushed
                 self._handle(event.dest_path)
-                has_deletions.set()
+                try:
+                    rel = str(Path(event.src_path).relative_to(repo_root))
+                    with lock:
+                        deleted.add(rel)
+                except ValueError:
+                    pass
 
         def on_deleted(self, event):
+            if event.is_directory:
+                return
             if is_excluded(event.src_path):
                 return
+            try:
+                rel = str(Path(event.src_path).relative_to(repo_root))
+            except ValueError:
+                return
             with lock:
-                pending.discard(str(Path(event.src_path).relative_to(repo_root)) if Path(event.src_path).is_relative_to(repo_root) else "")
-            has_deletions.set()
+                pending.discard(rel)
+                deleted.add(rel)
 
     observer = Observer()
     observer.schedule(Handler(), str(repo_root), recursive=True)
@@ -213,18 +242,26 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
             with lock:
                 batch = list(pending)
                 pending.clear()
-            deletion = has_deletions.is_set()
-            has_deletions.clear()
+                removals = list(deleted)
+                deleted.clear()
 
-            if not batch and not deletion:
+            if not batch and not removals:
                 continue
 
             timestamp = datetime.now().strftime("%H:%M:%S")
-            if deletion:
-                # Full sync needed so rsync --delete can remove the file on the remote
-                print(f"[{timestamp}] Deletion detected — running full sync")
-                rc = sync_full(repo_root, remote, exclude_file, dry_run=False)
-            else:
+            # Anything "deleted" that still exists was overwritten (atomic write) — sync it
+            overwritten = [f for f in removals if (repo_root / f).exists()]
+            removals = [f for f in removals if not (repo_root / f).exists()]
+            batch = list(set(batch) | set(overwritten))
+
+            # Drop batch entries that no longer exist (temp files from atomic writes)
+            batch = [f for f in batch if (repo_root / f).exists()]
+
+            rc = 0
+            if removals:
+                print(f"[{timestamp}] Deleting {len(removals)} file(s): {', '.join(removals)}")
+                delete_from_remote(removals, remote)
+            if batch:
                 print(f"[{timestamp}] Syncing {len(batch)} file(s): {', '.join(batch)}")
                 rc = sync_batch(batch, repo_root, remote)
 
