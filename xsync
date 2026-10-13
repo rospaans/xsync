@@ -20,7 +20,6 @@ Usage:
 import os
 import re
 import sys
-import shlex
 import subprocess
 import tomllib
 import fnmatch
@@ -135,17 +134,20 @@ def inside_remote(rels: list[str]) -> list[str]:
     """Drop relative paths that could resolve outside the remote project directory."""
     safe = []
     for rel in rels:
-        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts or "\n" in rel or "\r" in rel:
             print(f"⚠️  Skipping path outside the project: {rel!r}")
         else:
             safe.append(rel)
     return safe
 
 
-def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False, rsync: list[str] = RSYNC) -> int:
+def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False,
+               rsync: list[str] = RSYNC, delete_missing: bool = False) -> int:
     """Sync a batch of relative file paths using rsync --files-from.
 
     --files-from implies --relative, so missing parent directories are created.
+    With delete_missing, listed files that no longer exist locally are deleted
+    on the remote.
     """
     batch = inside_remote(batch)
     if not batch:
@@ -162,6 +164,8 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     ]
     if dry_run:
         cmd.insert(1, "--dry-run")
+    if delete_missing:
+        cmd.insert(1, "--delete-missing-args")
     try:
         return subprocess.run(cmd).returncode
     finally:
@@ -177,12 +181,17 @@ def is_ssh_remote(remote: str) -> bool:
     return ":" in remote
 
 
-def ssh_reachable(remote: str) -> bool:
-    """Check that the SSH host answers without prompting for a password."""
+def ssh_reachable(remote: str, rsync: list[str] = RSYNC) -> bool:
+    """Check that the SSH host answers without prompting for a password.
+
+    Probes through rsync instead of running a remote command, so it also
+    works with keys that are restricted to rsync (rrsync).
+    """
     host = remote.split(":", 1)[0]
     # -T: no terminal, even if ~/.ssh/config sets RequestTTY for this host
-    cmd = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"]
-    return subprocess.run(cmd).returncode == 0
+    ssh = "ssh -T -o BatchMode=yes -o ConnectTimeout=5"
+    cmd = [rsync[0], "-e", ssh, "--list-only", f"{host}:."]
+    return subprocess.run(cmd, stdout=subprocess.DEVNULL).returncode == 0
 
 
 def normalize_remote(remote: str) -> str:
@@ -201,32 +210,23 @@ def unsafe_remote_reason(remote: str) -> str | None:
     # "." is the home directory over SSH and the current directory locally
     if os.path.normpath(stripped) in ("~", ".", str(Path.home())):
         return "the remote path is a home (or the current) directory"
+    if ".." in Path(stripped).parts:
+        return "the remote path contains '..'"
     return None
 
 
-def build_remote_rm_command(remote_base: str, rels: list[str]) -> str:
-    """Build the shell command that deletes rels under remote_base on the remote host."""
-    base = remote_base.rstrip("/") if remote_base else "."
-    # A leading ~/ must stay unquoted so the remote shell still expands it
-    prefix = ""
-    if base == "~" or base.startswith("~/"):
-        prefix, base = "~/", base[2:]
-    targets = [rel if prefix and not base else f"{base}/{rel}" for rel in rels]
-    return "rm -f -- " + " ".join(prefix + shlex.quote(t) for t in targets)
+def delete_from_remote(deleted_rels: list[str], repo_root: Path, remote: str, rsync: list[str] = RSYNC) -> int:
+    """Delete specific files from remote without a full rsync scan.
 
-
-def delete_from_remote(deleted_rels: list[str], remote: str) -> int:
-    """Delete specific files from remote without a full rsync scan."""
-    deleted_rels = inside_remote(deleted_rels)
-    if not deleted_rels:
-        return 0
+    Over SSH this goes through rsync (--delete-missing-args, GNU rsync 3.1+),
+    so no shell command ever runs on the remote host.
+    """
     if is_ssh_remote(remote):
-        host, remote_base = remote.split(":", 1)
-        rc = subprocess.run(["ssh", "-T", host, build_remote_rm_command(remote_base, deleted_rels)]).returncode
+        rc = sync_batch(deleted_rels, repo_root, remote, rsync=rsync, delete_missing=True)
         if rc != 0:
-            print(f"⚠️  Remote delete failed: ssh exited with code {rc}.")
+            print(f"⚠️  Remote delete failed: rsync exited with code {rc}.")
         return rc
-    for rel in deleted_rels:
+    for rel in inside_remote(deleted_rels):
         target = Path(remote.rstrip("/")) / rel
         target.unlink(missing_ok=True)
     return 0
@@ -360,7 +360,7 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
             rm_rc = 0
             if removals:
                 print(f"[{timestamp}] Deleting {len(removals)} file(s): {', '.join(removals)}")
-                rm_rc = delete_from_remote(removals, remote)
+                rm_rc = delete_from_remote(removals, repo_root, remote, rsync)
             if batch:
                 print(f"[{timestamp}] Syncing {len(batch)} file(s): {', '.join(batch)}")
                 rc = sync_batch(batch, repo_root, remote, rsync=rsync)
@@ -442,11 +442,11 @@ def main():
             print("   Point 'remote' in .xsync.toml at a dedicated project directory.")
             sys.exit(1)
 
-    if is_ssh_remote(remote) and not ssh_reachable(remote):
+    if is_ssh_remote(remote) and not ssh_reachable(remote, rsync):
         host = remote.split(":", 1)[0]
         print(f"❌ Cannot reach '{host}' over SSH.")
         print("   Host unreachable, key not loaded (ssh-add), or VPN not connected.")
-        print(f"   Try: ssh {host} true")
+        print(f"   Try: rsync --list-only {host}:.")
         sys.exit(1)
 
     if watch:

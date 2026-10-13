@@ -10,7 +10,8 @@ A small `rsync` wrapper for syncing a local project directory to a remote destin
 
 SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now the primary setup. Local paths keep working.
 
-- **Safe remote deletes**: `--watch` quotes deleted paths with `shlex.quote` and passes them after `rm -f --`, so odd filenames can no longer break or inject commands. A failed delete prints a warning.
+- **No remote shell commands**: `--watch` deletes remote files through rsync (`--delete-missing-args`) instead of `ssh host rm ...`, and the reachability check also goes through rsync. Odd filenames cannot inject commands, and xsync works with an SSH key restricted to rsync (see "Restricting xsync to one remote folder"). Watch-mode deletes over SSH need GNU rsync 3.1+ on both sides.
+- **Stays inside the remote folder**: paths that are absolute or contain `..` are never synced or deleted, and a `remote` containing `..` is refused.
 - **Single-file sync creates missing folders**: `xsync path/to/new/file.py` works even if `path/to/new/` does not exist on the remote yet.
 - **`--delete` guard**: full syncs refuse to run when the remote path is empty, `/`, `~`, `.` or a home directory. A missing trailing `/` on `remote` is added automatically.
 - **Compression only over SSH**: `-z` is dropped for local and mounted paths.
@@ -90,6 +91,33 @@ exclude = [
 
 The `remote` field is an SSH target in the form `host:/path/` (or `user@host:/path/`), or a local path (mounted volume, external drive). For SSH, define the host in `~/.ssh/config` with key authentication; `ControlMaster` multiplexing makes repeated syncs and `--watch` much faster.
 
+## Restricting xsync to one remote folder
+
+xsync only ever addresses paths below `remote`, but your normal SSH login can usually reach much more. To make everything outside one folder unreachable for xsync, whatever the script or a wrong `remote` says, use a dedicated SSH key restricted with `rrsync` (ships with rsync). One-time setup:
+
+1. Create a key on your machine:
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/xsync_ed25519 -C xsync
+   ```
+2. On the server, add one line to `~/.ssh/authorized_keys`, using the contents of `~/.ssh/xsync_ed25519.pub` and the folder xsync may use:
+   ```
+   command="rrsync /path/to/your/folder",restrict ssh-ed25519 AAAA... xsync
+   ```
+3. Add a host alias to `~/.ssh/config` on your machine:
+   ```
+   Host myhost-sync
+       HostName server.example.org
+       User you
+       IdentityFile ~/.ssh/xsync_ed25519
+       IdentitiesOnly yes
+   ```
+4. In each project, give `remote` relative to the restricted folder:
+   ```toml
+   remote = "myhost-sync:research/project_1/"
+   ```
+
+That key can only run rsync, and only inside the folder named in step 2. Check with `rsync --list-only myhost-sync:.`; `ssh myhost-sync` should be refused.
+
 ## How it works
 
 - **Full sync** (`xsync`): invokes `rsync -av --delete` with the exclude list (plus `-z` over SSH). The remote becomes an exact mirror of the local project, minus excluded paths.
@@ -114,7 +142,7 @@ Add `.xsync.toml` to the project's `.gitignore` if the remote path is personal, 
 Either `cd` into a project that has one, or run `xsync --init` to create one here.
 
 **Cannot reach host over SSH**
-The host is down, your key is not loaded (`ssh-add`), or the VPN is not connected. Check with `ssh <host> true`.
+The host is down, your key is not loaded (`ssh-add`), or the VPN is not connected. Check with `rsync --list-only <host>:.`.
 
 **Refusing to sync with --delete**
 The `remote` path is empty, `/`, or a home directory. Point it at a dedicated project directory.

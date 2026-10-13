@@ -4,7 +4,6 @@ import importlib.machinery
 import importlib.util
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -35,6 +34,17 @@ EXCLUDES = [".xsync.toml", ".xsync.exclude", ".xsync.files", "ignored/"]
 needs_rsync = pytest.mark.skipif(
     shutil.which(xsync.resolve_rsync({})) is None, reason="rsync not available"
 )
+
+
+def _default_rsync_is_gnu() -> bool:
+    try:
+        out = subprocess.run([xsync.resolve_rsync({}), "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return False
+    return xsync.is_gnu_rsync3(out)
+
+
+needs_gnu_rsync = pytest.mark.skipif(not _default_rsync_is_gnu(), reason="needs GNU rsync 3.x")
 
 
 def run_xsync(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -95,10 +105,9 @@ def test_make_excluded_checker(path, expected):
     assert is_excluded(path) is expected
 
 
-# --- remote rm command quoting ---------------------------------------------
+# --- awkward filenames -----------------------------------------------------
 
 NASTY_NAMES = [
-    "plain.txt",
     "with space.txt",
     "it's.txt",
     "$HOME.txt",
@@ -108,45 +117,31 @@ NASTY_NAMES = [
 ]
 
 
-def test_rm_command_roundtrips_through_shell_parsing():
-    cmd = xsync.build_remote_rm_command("/srv/my project/", NASTY_NAMES)
-    argv = shlex.split(cmd)
-    assert argv[:3] == ["rm", "-f", "--"]
-    assert argv[3:] == [f"/srv/my project/{name}" for name in NASTY_NAMES]
+@needs_gnu_rsync
+def test_batch_sync_and_delete_handle_awkward_filenames(tmp_path):
+    tmp_path = tmp_path.resolve()
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    for name in NASTY_NAMES + ["keep.txt"]:
+        (src / name).write_text("x")
+    rsync = [xsync.resolve_rsync({})]
+    remote = str(dst) + "/"
 
+    assert xsync.sync_batch(NASTY_NAMES + ["keep.txt"], src, remote, rsync=rsync) == 0
+    assert tree(dst) == set(NASTY_NAMES) | {"keep.txt"}
 
-def test_rm_command_is_safe_when_run_by_a_real_shell(tmp_path):
-    base = tmp_path / "remote"
-    cwd = tmp_path / "cwd"
-    base.mkdir()
-    cwd.mkdir()
     for name in NASTY_NAMES:
-        (base / name).write_text("x")
-    (base / "keep.txt").write_text("x")
-
-    cmd = xsync.build_remote_rm_command(str(base) + "/", NASTY_NAMES)
-    result = subprocess.run(["sh", "-c", cmd], cwd=cwd)
-
-    assert result.returncode == 0
-    assert [p.name for p in base.iterdir()] == ["keep.txt"]
-    assert list(cwd.iterdir()) == []  # nothing injected
-
-
-def test_rm_command_leading_dash_with_empty_base():
-    cmd = xsync.build_remote_rm_command("", ["-rf"])
-    assert shlex.split(cmd) == ["rm", "-f", "--", "./-rf"]
-
-
-def test_rm_command_keeps_tilde_expandable():
-    cmd = xsync.build_remote_rm_command("~/proj/", ["it's here.txt"])
-    assert cmd.startswith("rm -f -- ~/")
-    assert shlex.split(cmd)[3:] == ["~/proj/it's here.txt"]
+        (src / name).unlink()
+    assert xsync.sync_batch(NASTY_NAMES, src, remote, rsync=rsync, delete_missing=True) == 0
+    assert tree(dst) == {"keep.txt"}
+    assert tree(tmp_path) == {"src/keep.txt", "dst/keep.txt"}  # nothing injected
 
 
 # --- paths stay inside the remote project ----------------------------------
 
 def test_inside_remote_drops_escaping_paths():
-    rels = ["a.txt", "sub/b.txt", "../up.txt", "sub/../../up.txt", "/etc/passwd", ""]
+    rels = ["a.txt", "sub/b.txt", "../up.txt", "sub/../../up.txt", "/etc/passwd", "", "a\n../up.txt"]
     assert xsync.inside_remote(rels) == ["a.txt", "sub/b.txt"]
 
 
@@ -155,7 +150,7 @@ def test_delete_from_remote_cannot_reach_parent(tmp_path):
     remote.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("keep")
-    xsync.delete_from_remote(["../outside.txt", str(outside)], str(remote) + "/")
+    xsync.delete_from_remote(["../outside.txt", str(outside)], tmp_path, str(remote) + "/")
     assert outside.exists()
 
 
@@ -190,6 +185,9 @@ def test_sync_batch_cannot_write_to_parent(tmp_path):
     "host:.",
     "user@host:/",
     f"host:{HOME}/",
+    "host:/srv/project/../",
+    "host:project/../../other/",
+    "/Volumes/vol/project/../other/",
 ])
 def test_dangerous_remotes_are_rejected(remote):
     assert xsync.unsafe_remote_reason(remote) is not None
@@ -326,7 +324,7 @@ def test_delete_from_local_remote(tmp_path):
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "b.txt").write_text("b")
     (tmp_path / "keep.txt").write_text("k")
-    rc = xsync.delete_from_remote(["sub/b.txt", "missing.txt"], str(tmp_path) + "/")
+    rc = xsync.delete_from_remote(["sub/b.txt", "missing.txt"], tmp_path, str(tmp_path) + "/")
     assert rc == 0
     assert tree(tmp_path) == {"keep.txt"}
 
@@ -344,7 +342,7 @@ def ssh_localhost():
         pytest.skip("ssh localhost is not available")
 
 
-@needs_rsync
+@needs_gnu_rsync
 def test_ssh_sync_to_localhost(project, ssh_localhost):
     src, dst = project
     write_config(src, f"localhost:{dst}/")
@@ -361,5 +359,8 @@ def test_ssh_sync_to_localhost(project, ssh_localhost):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "deep/nested/it's a file.py" in tree(dst)
 
-    assert xsync.delete_from_remote(["deep/nested/it's a file.py", "a.txt"], remote) == 0
+    (nested / "it's a file.py").unlink()
+    (src / "a.txt").unlink()
+    rels = ["deep/nested/it's a file.py", "a.txt"]
+    assert xsync.delete_from_remote(rels, src, remote, [xsync.resolve_rsync({})]) == 0
     assert tree(dst) == {"sub/b.txt"}
