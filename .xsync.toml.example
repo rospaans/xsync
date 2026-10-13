@@ -1,19 +1,9 @@
-# xsync configuration
-# The local path is auto-detected as the directory containing this file.
+# xsync configuration. The folder containing this file is what gets synced.
 
-# Remote destination: SSH target, where the host is an alias from ~/.ssh/config
+# Where to sync to: "<ssh alias>:<folder on the server>/"
 remote = "myhost:/path/to/project/"
-# Alternative: a local path (e.g. mounted volume)
-# remote = "/Volumes/your-volume/your-project/"
 
-# rsync binary to use (default: /opt/homebrew/bin/rsync if present, else rsync from PATH)
-# rsync = "/opt/homebrew/bin/rsync"
-
-# Extra rsync flags, e.g. when the remote directory is a network share that
-# rejects permission, ownership or timestamp changes
-# rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-dir-times", "--inplace", "--checksum"]
-
-# Patterns to exclude from sync (rsync exclude-from syntax)
+# Files and folders to skip (rsync exclude syntax)
 exclude = [
     ".git/",
     ".venv/",
@@ -29,3 +19,8 @@ exclude = [
     "outputs/",
     "logs/",
 ]
+
+# --- Optional settings: remove the leading "# " from a line to use it ---
+# remote = "/Volumes/your-volume/your-project/"   # a local path instead of SSH (replaces the remote line above)
+# rsync = "/opt/homebrew/bin/rsync"               # use a specific rsync binary
+# rsync_args = ["--no-perms", "--no-times"]       # extra flags passed to rsync; see the README for network shares

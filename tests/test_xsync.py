@@ -313,6 +313,14 @@ def test_help_and_bad_arguments_never_sync(project, args):
         assert result.returncode == 2
 
 
+def test_starter_config_is_valid_toml():
+    import tomllib
+    config = tomllib.loads(xsync.STARTER_CONFIG)
+    assert config["remote"] == "myhost:/path/to/project/"
+    assert set(config) == {"remote", "exclude"}
+    assert ".xsync.files" in config["exclude"]
+
+
 @needs_rsync
 def test_full_sync_from_subdirectory(project):
     src, dst = project

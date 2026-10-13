@@ -17,7 +17,7 @@ SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now t
 - **Compression only over SSH**: `-z` is dropped for local and mounted paths.
 - **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) is reported within 5 seconds, before any sync and before `--watch` starts.
 - **rsync flavor**: new optional `rsync = "/path/to/rsync"` key. Defaults to `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`. A one-line warning is printed if it is not GNU rsync 3.x (recent macOS ships openrsync).
-- **Extra rsync flags**: new optional `rsync_args = [...]` key, for remotes on storage that rejects permission, ownership or timestamp changes (see "Remotes on a network share").
+- **Extra rsync flags**: new optional `rsync_args = [...]` key, for example for server folders on storage that rejects permission, ownership or timestamp changes (see "Remotes on a network share").
 - **Tests**: `python -m pytest tests`.
 
 ## What it does
@@ -221,17 +221,10 @@ Each project then chooses its boundary through the alias in its `remote`. Do not
 Each project is configured by one file, `.xsync.toml`, in the project root. The next section shows how to create it; this is what it contains:
 
 ```toml
-# Remote destination: SSH target, where the host is an alias from ~/.ssh/config
+# Where to sync to: "<ssh alias>:<folder on the server>/"
 remote = "myhost:/path/to/project/"
 
-# rsync binary to use (default: /opt/homebrew/bin/rsync if present, else rsync from PATH)
-# rsync = "/opt/homebrew/bin/rsync"
-
-# Extra rsync flags, e.g. when the remote directory is a network share that
-# rejects permission, ownership or timestamp changes
-# rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-dir-times", "--inplace", "--checksum"]
-
-# Patterns to exclude (rsync exclude-from syntax)
+# Files and folders to skip (rsync exclude syntax)
 exclude = [
     ".git/",
     ".venv/",
@@ -242,7 +235,19 @@ exclude = [
     "data/",
     "outputs/",
 ]
+
+# --- Optional settings: remove the leading "# " from a line to use it ---
+# remote = "/Volumes/your-volume/your-project/"   # a local path instead of SSH (replaces the remote line above)
+# rsync = "/opt/homebrew/bin/rsync"               # use a specific rsync binary
+# rsync_args = ["--no-perms", "--no-times"]       # extra flags passed to rsync; see the README for network shares
 ```
+
+| Setting | Required | Meaning |
+|---|---|---|
+| `remote` | yes | Where to sync to. |
+| `exclude` | no | Files and folders to skip. |
+| `rsync` | no | Path to the rsync binary. Default: `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`. |
+| `rsync_args` | no | A list of extra flags passed to rsync, placed after xsync's own so they can override them. |
 
 The `remote` field is an SSH target in the form `host:/path/`, where `host` is an alias from `~/.ssh/config`. `user@host:/path/` also works.
 
@@ -279,7 +284,7 @@ Use a folder that belongs to this project alone. A full sync deletes anything in
 
 **Step 3. Adjust `exclude`.** Add folders that should stay only on one side, such as large data or results produced on the server.
 
-**Step 4. If the server folder is on a network share,** add the `rsync_args` line from "Remotes on a network share".
+**Step 4. If the server folder is on a network share,** you may need an `rsync_args` line. See "Remotes on a network share".
 
 **Step 5. Preview, then sync.**
 
@@ -310,18 +315,21 @@ rsync: failed to set times on "...": Operation not permitted (1)
 rsync: mkstemp "..." failed: Operation not permitted (1)
 ```
 
-Tell rsync not to attempt those changes by adding `rsync_args` to `.xsync.toml`:
+xsync has no built-in setting for this, because what a share refuses differs from one to the next. Use `rsync_args` in `.xsync.toml` to switch off only what yours rejects. Match each error to a flag:
+
+| Error mentions | Add to `rsync_args` | Effect |
+|---|---|---|
+| `failed to set permissions` | `--no-perms` | Do not set permissions. |
+| `chown` or `chgrp` | `--no-owner`, `--no-group` | Do not set ownership. |
+| `failed to set times` on a folder | `--omit-dir-times` | Do not set modification times on folders. |
+| `failed to set times` on a file | `--no-times`, `--checksum` | Do not set modification times on files, and detect changes by content instead. |
+| `mkstemp ... failed` | `--inplace` | Write files directly instead of through a temporary file. |
+
+Add flags until `xsync` runs without errors. As an example, a share that refuses all of the above needs:
 
 ```toml
 rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-dir-times", "--inplace", "--checksum"]
 ```
-
-| Flag | Effect |
-|---|---|
-| `--no-perms`, `--no-owner`, `--no-group` | Do not set permissions or ownership. |
-| `--no-times`, `--omit-dir-times` | Do not set modification times on files and folders. |
-| `--inplace` | Write files directly instead of through a temporary file. |
-| `--checksum` | Detect changes by content, because modification times no longer match. |
 
 `--checksum` makes a full sync read every file on both sides. That is quick for code, but slow if large data files are not excluded. Single-file sync and `--watch` are not affected.
 
@@ -362,7 +370,7 @@ remote = "/Volumes/your-volume/your-project/"
 - Compression (`-z`) is switched off, since nothing travels over a network connection that rsync controls.
 - `--watch` removes deleted files directly on the mounted path.
 - The same `--delete` guard applies: the path must not be `/`, your home directory or the current directory.
-- A mounted share can reject permission or timestamp changes in the same way as a server-side one. If you see "Operation not permitted", use the `rsync_args` from "Remotes on a network share".
+- A mounted share can reject permission or timestamp changes in the same way as a server-side one. If you see "Operation not permitted", see "Remotes on a network share".
 
 ## Troubleshooting
 
