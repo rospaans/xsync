@@ -1229,8 +1229,16 @@ class App:
         self._drawn_rows = 0
         self._list_height = 0  # rows of a project's list that fit on screen
         self.projects = [Project(root, self) for root in load_registry(registry)]
+        self.sort()
 
     # --- projects
+
+    def sort(self):
+        """Keep the overview in alphabetical order, with the highlight on the same project."""
+        highlighted = self.projects[self.selected] if self.selected < len(self.projects) else None
+        self.projects.sort(key=lambda project: (project.name.lower(), str(project.root)))
+        if highlighted is not None:
+            self.selected = self.projects.index(highlighted)
 
     def register(self, root: Path) -> Project:
         """Remember a project (if it is new) and return it."""
@@ -1240,6 +1248,7 @@ class App:
                 return project
         project = Project(root, self)
         self.projects.append(project)
+        self.sort()
         self.save()
         return project
 

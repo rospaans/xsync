@@ -830,16 +830,31 @@ def test_opening_a_project_replays_the_end_of_its_list(hub):
 @pytest.mark.parametrize("width", [1, 20, 60, 120, 200])
 def test_overview_rows_fit_and_mark_the_highlighted_project(hub, tmp_path, monkeypatch, width, colors):
     monkeypatch.setattr(xsync, "colors_on", lambda: colors)
+    alpha = hub.projects[0]
     hub.register(make_project_folder(tmp_path / "work" / "a-rather-long-project-name", "host:some/remote/folder/"))
     hub.register(tmp_path / "work" / "gone")
-    hub.projects[0].changes = 28
-    hub.selected = 1
+    alpha.changes = 28
+    hub.selected = hub.projects.index(alpha)
     rows = [visible(row) for row in hub.table_rows(width)]
     assert len(rows) == 3 and all(len(row) == width for row in rows)
     if width >= 120:
-        assert rows[1].startswith(" › a-rather-long-project-name") and "SSH" in rows[1]
-        assert rows[0].startswith("   alpha") and "LOCAL" in rows[0] and "28 changes" in rows[0]
+        assert rows[0].startswith("   a-rather-long-project-name") and "SSH" in rows[0]
+        assert rows[1].startswith(" › alpha") and "LOCAL" in rows[1] and "28 changes" in rows[1]
         assert "folder not found" in rows[2]
+
+
+def test_overview_is_alphabetical_and_the_highlight_stays_on_its_project(hub, tmp_path):
+    alpha = hub.projects[0]
+    for name in ("zeta", "Beta", "00_first", "delta"):
+        hub.register(make_project_folder(tmp_path / "work" / name, f"host:projects/{name}/"))
+        assert hub.projects[hub.selected] is alpha         # adding others does not move the highlight
+    assert [project.name for project in hub.projects] == ["00_first", "alpha", "Beta", "delta", "zeta"]
+    assert [root.name for root in xsync.load_registry(hub.registry)] == ["00_first", "alpha", "Beta", "delta", "zeta"]
+
+    # a list saved in another order is sorted when it is read
+    xsync.save_registry(hub.registry, [project.root for project in reversed(hub.projects)])
+    again = xsync.App(hub.registry, screen=FakeScreen())
+    assert [project.name for project in again.projects] == ["00_first", "alpha", "Beta", "delta", "zeta"]
 
 
 def test_overview_without_projects_says_what_to_do(tmp_path):

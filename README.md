@@ -374,7 +374,7 @@ xsync remembers each project the first time you run it there (it walks up from t
    data_pipeline     SSH  myhost:projects/data_pipeline/                            ● syncing…    42 changes
 ```
 
-Each row is a project: its name, where it syncs to, what it is doing, and how many changes it has sent. `›` marks the highlighted row.
+Each row is a project: its name, where it syncs to, what it is doing, and how many changes it has sent. The rows are in alphabetical order, and `›` marks the highlighted one.
 
 | Key | Action |
 |---|---|
