@@ -6,20 +6,23 @@
 
 A small `rsync` wrapper for syncing a local project directory to a server over SSH. One command, one config file per project.
 
-![The xsync session in watch mode: a status bar, a grid of key buttons, and a list of synced changes](docs/session.svg)
+![The overview: one row per project with its remote and state](docs/overview.svg)
+
+![One project in watch mode: a status bar, a grid of key buttons, and a list of synced changes](docs/session.svg)
 
 ## Recent changes
 
 xsync is now an interactive tool for SSH remotes. You run `xsync` in a terminal and do everything with single keys; the old command-line modes (`xsync file.py`, `--dry-run`, `--watch`, `--interval`) are gone.
 
-- **Interactive session**: a fixed status bar, two rows of buttons and a scrolling list of changes. Keys: sync, watch on/off, compare, sync one file or folder, reconnect, info, errors, verbose, help, quit.
+- **One place for all projects**: xsync remembers every project you run it in. Run `xsync` anywhere to get an overview of all of them, open one, and switch between them. Watch mode keeps running for each project it is on, so one terminal window is enough.
+- **Interactive session**: a fixed status bar, a grid of buttons and a scrolling list of changes. Keys: sync, watch on/off, compare, sync one file or folder, reconnect, info, errors, verbose, help, back, quit.
 - **SSH first**: `remote` is `host:/path/`, with `host` an alias from `~/.ssh/config`. Local paths and mounted volumes still work; see "Optional: local paths and mounted volumes".
 - **No remote shell commands**: syncing, deleting and the reachability check all go through rsync, so odd filenames cannot inject commands and xsync works with an SSH key restricted to rsync (see "Restricting xsync to one remote folder").
 - **Stays inside the remote folder**: paths that are absolute or contain `..` are never synced or deleted, and a `remote` containing `..` is refused.
 - **`--delete` guard**: xsync refuses to start when the remote path is empty, `/`, `~`, `.` or a home directory. A missing trailing `/` on `remote` is added automatically.
 - **Survives connection drops**: the server is checked once a minute, changes made while offline are queued and retried, and a dead connection is noticed instead of hanging.
 - **Watch mode cleans up**: deleted files are removed from the remote, and so are folders once they are empty there.
-- **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) is reported within 5 seconds at startup.
+- **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) shows as `OFFLINE` within seconds; xsync keeps running and retries.
 - **rsync flavor**: xsync uses `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`. With anything other than GNU rsync 3.x it warns and shows rsync's raw output. An optional `rsync = "/path/to/rsync"` key overrides the choice (see Troubleshooting).
 - **Extra rsync flags**: optional `rsync_args = [...]` key, for example for server folders on storage that rejects permission, ownership or timestamp changes (see "Remotes on a network share").
 - **Tests**: `python -m pytest tests`.
@@ -28,12 +31,14 @@ xsync is now an interactive tool for SSH remotes. You run `xsync` in a terminal 
 
 `xsync` reads a `.xsync.toml` file from the project root and uses `rsync` over SSH to keep the `remote` folder declared there identical to your local project. The logic lives in a single script on your `$PATH`; each project only needs a declarative config. Syncing is one way: local to remote.
 
-You run `xsync` in a terminal inside the project and press a key:
+You run `xsync` in a terminal and press a key:
 
 - **Compare** shows what differs between the project and the server, changing nothing.
 - **Sync** mirrors the project to the remote, respecting an exclude list.
 - **Watch** keeps the remote up to date while you, or coding agents, edit files.
 - **Path** pushes one file, or mirrors one folder.
+
+xsync remembers your projects. Inside a project folder it opens that project; anywhere else it shows an overview of all of them, and watch mode keeps running for every project it is switched on for.
 
 ## Requirements
 
@@ -305,7 +310,7 @@ Use a folder that belongs to this project alone. A full sync deletes anything in
 xsync
 ```
 
-It opens with a compare: the list shows what would be copied (`+`, `~`) or deleted (`-`) on the server, and nothing has changed yet. Check the remote shown in the bar and the `-` lines in particular. If it looks right, press `s` to sync, or `w` to sync and keep watching.
+This also adds the project to xsync's overview. It opens with a compare: the list shows what would be copied (`+`, `~`) or deleted (`-`) on the server, and nothing has changed yet. Check the remote shown in the bar and the `-` lines in particular. If it looks right, press `s` to sync, or `w` to sync and keep watching.
 
 **Several projects** each get their own config and their own server folder:
 
@@ -348,23 +353,60 @@ rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-di
 ## Usage
 
 ```bash
-xsync                      # open the session
-xsync --verbose            # open the session showing rsync's raw output
+xsync                      # in a project: open it; elsewhere: the overview of all projects
+xsync --verbose            # the same, showing rsync's raw output
 xsync --init               # create a starter .xsync.toml in current dir
 xsync --version            # show the version
 xsync --help               # show usage
 ```
 
-`xsync` walks up from the current directory to find `.xsync.toml`, so you can run it from any subdirectory of the project. Anything else on the command line is an error, and xsync needs a terminal: it never syncs from a script or because of a typo. If there is no `.xsync.toml`, xsync offers to create one when you press `i`.
+Anything else on the command line is an error, and xsync needs a terminal: it never syncs from a script or because of a typo. If there is no `.xsync.toml` here and no project is known yet, xsync offers to create one when you press `i`.
 
-### The session
+### The overview
 
-`xsync` first compares the project with the server, like `git status`, and changes nothing until you press a key:
+xsync remembers each project the first time you run it there (it walks up from the current directory to find `.xsync.toml`, so any subfolder works). Run `xsync` outside a project, or press `b` inside one, to see them all:
+
+```
+   X S Y N C     3 projects                                                         ● 2 watching    49 changes
+
+  o  Open           s  Sync           w  Watch          c  Compare        a  Add
+  x  Remove         v  Verbose off    h  Help           q  Quit
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ › my_project        SSH  myhost:projects/my_project/           ● in sync, watching for changes    7 changes
+   thesis_figures    SSH  myhost:projects/thesis_figures/                            ● 3 differences at 15:20
+   data_pipeline     SSH  myhost:projects/data_pipeline/                            ● syncing…    42 changes
+```
+
+Each row is a project: its name, where it syncs to, what it is doing, and how many changes it has sent. `›` marks the highlighted row.
+
+| Key | Action |
+|---|---|
+| `↑` `↓` | Move the highlight (`k` and `j` work too). |
+| `o` | Open the highlighted project (Enter and `→` work too). |
+| `s` | Sync the highlighted project now. |
+| `w` | Switch watch mode on or off for the highlighted project. |
+| `c` | Compare the highlighted project with the server, changing nothing. |
+| `a` | Add a project: type, paste or drag its folder and press Enter. |
+| `x` | Remove the highlighted project from the list. Its files, local and remote, are not touched. |
+| `v` | Verbose on or off, for all projects. |
+| `h` | Help. |
+| `q` | Quit. Ctrl+C works too. |
+
+**Projects keep working in the background.** Watch mode stays on for every project you switched it on for, whichever view is on screen, and each project keeps its own list of changes, which you see again when you open it. One sync runs at a time, so a long sync in one project briefly delays the others.
+
+**A project that cannot be synced** (its folder is gone, the config is invalid, `remote` is unsafe) stays in the list with the reason in place of its state, until you fix it or remove it with `x`.
+
+**Where the list is kept:** `~/.config/xsync/projects.toml` (or under `$XDG_CONFIG_HOME`). It only holds folder paths and is managed by xsync.
+
+### A project
+
+Opening a project from the overview, or running `xsync` inside its folder, shows that project. Started inside the folder, xsync first compares it with the server, like `git status`; nothing changes until you press a key:
 
 ```
  XSYNC   my_project  →   SSH  myhost:/data/projects/you/my_project/                   ● 3 differences at 15:52    0 changes
 
-  s  Sync           w  Watch off      c  Compare        f  Path           r  Reconnect
+  s  Sync           w  Watch off      c  Compare        f  Path           r  Reconnect      b  Back
   i  Info           e  Errors         v  Verbose off    h  Help           q  Quit
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -383,11 +425,12 @@ The top of the screen stays fixed; changes scroll below it. On a narrow terminal
 | `c` | Compare: list what differs between the project and the server, without changing anything. |
 | `f` | Sync one file or folder. Type, paste or drag a path into the terminal and press Enter (Esc cancels). A folder is mirrored like a full sync, limited to that folder. |
 | `r` | Check the connection now and, when it is back, send what was queued. |
+| `b` | Back to the overview of all projects (Esc and `←` work too). The project keeps watching if watch mode is on. |
 | `i` | Info: the version, project, config file, remote, whether the host answers, and the rsync and flags in use. |
 | `e` | List the warnings and errors recorded so far, and clear the problem line. |
 | `v` | Verbose on or off: show rsync's raw output in place of the one-line-per-change list. |
 | `h` | Help: what each key does. |
-| `q` | Quit. Ctrl+C works too. |
+| `q` | Quit xsync, for all projects. Ctrl+C works too. |
 
 **The bar** shows, from left to right: the mode (`XSYNC` when idle, `WATCH`, or `OFFLINE`), the project, an `SSH` or `LOCAL` tag with the remote, the current state behind a dot, the number of changes sent, and the time of the last one. The dot is green when in sync, yellow when busy or when there are differences, and magenta for problems.
 
@@ -426,7 +469,7 @@ Press `w`. xsync does a full sync and then sends changes as they happen, in batc
 
 ### When the connection drops
 
-The session keeps running. It checks the server once a minute even when nothing changes, so a dropped VPN shows up without waiting for an edit. When offline, the badge reads `OFFLINE`, changes made in watch mode are queued, and xsync retries every 10 seconds. `r` retries immediately. When the server answers again, the queued changes are sent.
+xsync keeps running. For every project you have opened or are watching, it checks the server once a minute even when nothing changes, so a dropped VPN shows up without waiting for an edit. When offline, the badge reads `OFFLINE`, changes made in watch mode are queued, and xsync retries every 10 seconds. `r` retries immediately. When the server answers again, the queued changes are sent.
 
 The terminal tab title shows the project and state, so you can see it when the terminal is in the background.
 

@@ -503,95 +503,413 @@ def test_summarized_output_and_counters(project, monkeypatch, capsys):
 @needs_gnu_rsync
 def test_warnings_reach_the_problem_hook(project, monkeypatch, capsys):
     seen = []
+
+    class Recorder(xsync.Printer):
+        def problem(self, text):
+            seen.append(text)
+
     monkeypatch.setattr(xsync, "PRETTY", True)
-    monkeypatch.setattr(xsync, "PROBLEM_HOOK", seen.append)
+    monkeypatch.setattr(xsync, "OUTPUT", Recorder())
     rc = project.sync(remote=str(project.dst / "missing" / "deeper") + "/")  # parent folder does not exist
     assert rc != 0
     assert seen and any("rsync" in text for text in seen)
     assert "! " in capsys.readouterr().out
 
 
-# --- the session's fixed rows --------------------------------------------------
+# --- the fixed rows of a view ----------------------------------------------------
 
-def make_screen():
-    return xsync.Screen("a_project", "host:some/long/remote/folder/", "ssh")
+def make_panel():
+    panel = xsync.Panel("a_project", xsync.PROJECT_KEYS, "host:some/long/remote/folder/", "ssh")
+    panel.switches = {"w": False, "v": False}
+    return panel
 
 
 @pytest.mark.parametrize("colors", [False, True])
-@pytest.mark.parametrize("width", [12, 25, 40, 80, 120, 200])
-def test_session_rows_never_exceed_terminal_width(width, colors, monkeypatch):
+@pytest.mark.parametrize("width", [1, 12, 25, 40, 80, 120, 200])
+def test_fixed_rows_never_exceed_terminal_width(width, colors, monkeypatch):
     monkeypatch.setattr(xsync, "colors_on", lambda: colors)
-    screen = make_screen()
+    panel = make_panel()
     states = [("watch", xsync.IDLE, "ok", "WATCH"), ("idle", "3 differences at 15:44", "busy", "XSYNC"),
               ("offline", "offline, 3 queued, retrying", "problem", "OFFLINE")]
     for mode, state, level, label in states:
-        screen.mode, screen.state, screen.level, screen.detail = mode, state, level, "28 changes · last 15:44:16"
-        bar = visible(screen.bar(width))
+        panel.mode, panel.state, panel.level, panel.detail = mode, state, level, "28 changes · last 15:44:16"
+        bar = visible(panel.bar(width))
         assert len(bar) <= width
         assert bar.startswith(f" {label} "[:width])
-    screen.message = "last problem 15:44:16: " + "x" * 300
-    for row in screen.header_rows(width):
+    panel.message = "last problem 15:44:16: " + "x" * 300
+    for row in panel.header_rows(width):
         assert len(visible(row)) <= width
 
 
 def test_banner_is_one_row(monkeypatch):
     monkeypatch.setattr(xsync, "colors_on", lambda: True)
-    screen = make_screen()
-    assert "X S Y N C" in visible(screen.banner(200))   # letter-spaced when wide
-    assert " XSYNC " in visible(screen.banner(60))       # compact when narrow
+    panel = make_panel()
+    assert "X S Y N C" in visible(panel.banner(200))   # letter-spaced when wide
+    assert " XSYNC " in visible(panel.banner(60))       # compact when narrow
     for width in (5, 60, 89, 90, 200):
-        assert len(visible(screen.banner(width))) == width
-        assert "\n" not in screen.banner(width)
+        assert len(visible(panel.banner(width))) == width
+        assert "\n" not in panel.banner(width)
 
 
 def test_bar_shows_transport_state_and_counter():
-    screen = make_screen()
-    screen.state, screen.detail = "in sync at 15:52", "28 changes · last 15:44:16"
-    bar = screen.bar(200)
+    panel = make_panel()
+    panel.state, panel.detail = "in sync at 15:52", "28 changes · last 15:44:16"
+    bar = panel.bar(200)
     for part in ("XSYNC", "a_project", "SSH", "host:some/long/remote/folder/", "in sync at 15:52", "28 changes"):
         assert part in bar
 
 
-def test_buttons_cover_every_key_and_show_switch_states():
-    screen = make_screen()
-    rows = "\n".join(screen.key_rows(200))
-    keys = [key for row in xsync.SESSION_KEYS for key, _ in row]
-    assert len(keys) == len(set(keys))
-    assert set(keys) == set(xsync.KEY_HELP)
-    for key in keys:
+def test_bar_without_a_remote():
+    panel = xsync.Panel("3 projects", xsync.OVERVIEW_KEYS)
+    panel.state = "2 watching"
+    for width in (10, 40, 120):
+        bar = panel.bar(width)
+        assert len(bar) <= width
+    assert "3 projects" in panel.bar(120) and "→" not in panel.bar(120)
+
+
+@pytest.mark.parametrize("keys, help_text", [
+    (xsync.PROJECT_KEYS, xsync.KEY_HELP), (xsync.OVERVIEW_KEYS, xsync.OVERVIEW_HELP),
+])
+def test_every_button_has_a_unique_key_and_help(keys, help_text):
+    flat = [key for row in keys for key, _ in row]
+    assert len(flat) == len(set(flat))
+    assert set(flat) <= set(help_text)
+    rows = "\n".join(xsync.Panel("p", keys).key_rows(300))
+    for key in flat:
         assert f"[{key}]" in rows
+
+
+def test_buttons_show_switch_states():
+    panel = make_panel()
+    rows = "\n".join(panel.key_rows(200))
     assert "Watch off" in rows and "Verbose off" in rows
-    screen.watching = screen.verbose = True
-    rows = "\n".join(screen.key_rows(200))
+    panel.switches = {"w": True, "v": True}
+    rows = "\n".join(panel.key_rows(200))
     assert "Watch on" in rows and "Verbose on" in rows
 
 
 @pytest.mark.parametrize("colors", [False, True])
 def test_buttons_wrap_into_more_rows_on_a_narrow_terminal(colors, monkeypatch):
     monkeypatch.setattr(xsync, "colors_on", lambda: colors)
-    screen = make_screen()
-    keys = [key for row in xsync.SESSION_KEYS for key, _ in row]
+    panel = make_panel()
+    count = sum(len(row) for row in xsync.PROJECT_KEYS)
 
     def layout(width):
-        return [visible(row) for row in screen.key_rows(width)]
+        return [visible(row) for row in panel.key_rows(width)]
 
-    assert len(layout(200)) == 2                      # five columns
-    assert len(layout(60)) == 4                       # three columns
-    assert len(layout(45)) == 5                       # two columns
-    assert len(layout(25)) == len(keys)               # one button per line
+    assert len(layout(200)) == 2                       # all columns
+    assert len(layout(60)) == -(-count // 3)           # three columns
+    assert len(layout(45)) == -(-count // 2)           # two columns
+    assert len(layout(25)) == count                    # one button per line
     for width in (200, 60, 45, 25):
         rows = layout(width)
         text = "\n".join(rows)
         assert all(len(row) <= width for row in rows)
         assert "Reconnect" in text and "Verbose off" in text   # labels stay whole
-        assert len({len(row) for row in rows[:-1]}) == 1       # full rows line up
+        assert len({len(row) for row in rows[:-1]}) <= 1       # full rows line up
 
 
 def test_message_row_is_empty_without_a_message():
-    screen = make_screen()
-    assert screen.message_row(80) == ""
-    screen.message = "something happened"
-    assert "something happened" in screen.message_row(80)
+    panel = make_panel()
+    assert panel.message_row(80) == ""
+    panel.message = "something happened"
+    assert "something happened" in panel.message_row(80)
+
+
+# --- the hub: remembered projects, the overview, a project's state -------------------
+
+class FakeScreen:
+    """Stands in for the terminal: a fixed size, no keys, and writes are collected."""
+
+    def __init__(self, columns=120, lines=40):
+        self.columns, self.lines = columns, lines
+        self.written = []
+
+    def size(self):
+        return os.terminal_size((self.columns, self.lines))
+
+    def write(self, text):
+        self.written.append(text)
+
+    def read_key(self, timeout):
+        return None
+
+
+def make_project_folder(root: Path, remote: str, extra: str = "") -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    excludes = ", ".join(f'"{pattern}"' for pattern in EXCLUDES)
+    (root / ".xsync.toml").write_text(f'remote = "{remote}"\nexclude = [{excludes}]\n{extra}')
+    return root.resolve()
+
+
+@pytest.fixture
+def hub(tmp_path):
+    """An app with one project (src → dst, a few files) and a fake terminal."""
+    tmp_path = tmp_path.resolve()
+    src = make_project_folder(tmp_path / "work" / "alpha", str(tmp_path / "remote" / "alpha") + "/")
+    (tmp_path / "remote" / "alpha").mkdir(parents=True)
+    (src / "sub").mkdir()
+    (src / "a.txt").write_text("a")
+    (src / "sub" / "b.txt").write_text("b")
+    app = xsync.App(tmp_path / "config" / "projects.toml", screen=FakeScreen())
+    app.register(src)
+    yield app
+    for project in app.projects:
+        project.close()
+    xsync.OUTPUT = xsync.Printer()
+    xsync.PRETTY = False
+
+
+def test_registry_round_trip(tmp_path):
+    path = tmp_path / "config" / "xsync" / "projects.toml"
+    assert xsync.load_registry(path) == []
+    roots = [tmp_path / "one", tmp_path / 'with "quotes" and spaces']
+    xsync.save_registry(path, roots)
+    assert xsync.load_registry(path) == roots
+    assert tomllib.loads(path.read_text())["projects"] == [str(root) for root in roots]
+    path.write_text("not [valid toml")
+    assert xsync.load_registry(path) == []
+
+
+def test_registry_lives_in_the_user_config_folder(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert xsync.registry_path() == tmp_path / "xsync" / "projects.toml"
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    assert xsync.registry_path() == Path.home() / ".config" / "xsync" / "projects.toml"
+
+
+def test_projects_are_remembered_once_and_can_be_removed(hub, tmp_path):
+    alpha = hub.projects[0]
+    assert hub.register(alpha.root) is alpha            # already known
+    beta = hub.register(make_project_folder(tmp_path / "work" / "beta", "host:projects/beta/"))
+    assert [project.name for project in hub.projects] == ["alpha", "beta"]
+
+    again = xsync.App(hub.registry, screen=FakeScreen())  # a new run sees the same list
+    assert [project.root for project in again.projects] == [alpha.root, beta.root]
+
+    hub.remove(beta)
+    assert xsync.load_registry(hub.registry) == [alpha.root]
+    assert (beta.root / ".xsync.toml").exists()          # only the list entry is gone
+
+
+@pytest.mark.parametrize("config, expected", [
+    (None, "no .xsync.toml"),
+    ('exclude = []\n', "'remote' is not set"),
+    ('remote = "/"\n', "refusing to sync"),
+    ('remote = "host:project/../../"\n', "refusing to sync"),
+    ('remote = "host:project/"\ninterval = "soon"\n', "'interval'"),
+    ('remote = "host:project/"\nrsync = "/no/such/rsync"\n', "rsync not found"),
+    ('remote = [broken', "invalid .xsync.toml"),
+])
+def test_unusable_projects_say_why(hub, tmp_path, config, expected):
+    folder = tmp_path / "work" / "broken"
+    folder.mkdir(parents=True)
+    if config is not None:
+        (folder / ".xsync.toml").write_text(config)
+    project = hub.register(folder)
+    assert expected in project.error
+    assert project.panel.level == "problem" and expected in project.panel.state
+    project.tick(1e12)                                    # never tries to sync or probe
+    assert project.log == xsync.deque()
+
+
+def test_missing_project_folder_is_reported(hub, tmp_path):
+    assert hub.register(tmp_path / "work" / "gone").error == "folder not found"
+
+
+def test_project_settings_come_from_its_config(hub, tmp_path):
+    folder = make_project_folder(tmp_path / "work" / "beta", "myhost:projects/beta",
+                                 'interval = 5\nrsync_args = ["--inplace"]\n')
+    project = hub.register(folder)
+    assert project.error == ""
+    assert project.remote == "myhost:projects/beta/"     # trailing slash added
+    assert project.interval == 5
+    assert project.panel.transport == "ssh"
+    assert project.rsync[1:] == ["-e", xsync.SSH_COMMAND, "--inplace"]   # the user's flags come last
+
+
+@needs_gnu_rsync
+def test_project_compare_then_sync(hub):
+    project = hub.projects[0]
+    dst = Path(project.remote)
+
+    project.compare()
+    assert project.resting == (project.panel.state, "busy") and "3 differences" in project.panel.state
+    assert tree(dst) == set() and project.changes == 0
+    assert any("+ a.txt" in line and "not synced" in line for line in project.log)
+
+    project.full_sync()
+    assert tree(dst) == {"a.txt", "sub/b.txt"}
+    assert project.changes == 3 and project.last_change
+    assert project.panel.state.startswith("in sync at") and project.panel.level == "ok"
+    assert project.panel.detail.startswith("3 changes · last ")
+
+    project.full_sync()
+    assert "already up to date" in project.log[-1]
+    assert project.changes == 3
+    assert tree(project.root) == {".xsync.toml", "a.txt", "sub/b.txt"}   # no temp files left behind
+
+
+@needs_gnu_rsync
+def test_project_sync_one_path(hub):
+    project = hub.projects[0]
+    project.sync_one("sub/b.txt")
+    assert tree(Path(project.remote)) == {"sub/b.txt"}
+    project.sync_one("nowhere.txt")
+    assert "not found inside the project" in project.log[-1]
+    assert project.problems and "not found" in project.panel.message
+
+
+@needs_gnu_rsync
+def test_project_flush_sends_and_deletes_queued_changes(hub):
+    project = hub.projects[0]
+    dst = Path(project.remote)
+    project.full_sync()
+
+    (project.root / "new.txt").write_text("n")
+    (project.root / "sub" / "b.txt").unlink()
+    project.pending.update({"new.txt", "temp-file-that-vanished"})
+    project.deleted.add("sub/b.txt")
+    project.flush()
+
+    assert tree(dst) == {"a.txt", "new.txt"}
+    assert project.pending == set() and project.deleted == set()
+    assert project.changes == 5                           # 3 from the full sync, then + new.txt and - sub/b.txt
+    assert project.panel.state.startswith("in sync at")   # not watching, so back to the resting state
+
+
+@needs_gnu_rsync
+def test_each_project_keeps_its_own_list_and_counter(hub, tmp_path):
+    alpha = hub.projects[0]
+    beta_remote = tmp_path / "remote" / "beta"
+    beta_remote.mkdir(parents=True)
+    beta = hub.register(make_project_folder(tmp_path / "work" / "beta", str(beta_remote) + "/"))
+    (beta.root / "only-in-beta.txt").write_text("b")
+
+    alpha.full_sync()
+    beta.full_sync()
+    assert alpha.changes == 3 and beta.changes == 1
+    assert any("only-in-beta.txt" in line for line in beta.log)
+    assert not any("only-in-beta.txt" in line for line in alpha.log)
+    assert tree(beta_remote) == {"only-in-beta.txt"}
+    assert tree(Path(alpha.remote)) == {"a.txt", "sub/b.txt"}
+
+
+def test_only_the_project_on_screen_prints_its_lines(hub, capsys):
+    project = hub.projects[0]
+    hub.activate(project)
+    xsync.emit("hidden line")
+    assert capsys.readouterr().out == ""                  # the overview is showing
+    hub.open(project)
+    xsync.emit("visible line")
+    assert "visible line" in capsys.readouterr().out
+    assert [line.split("  ", 1)[1] for line in project.log] == ["hidden line", "visible line"]
+
+
+def test_opening_a_project_replays_the_end_of_its_list(hub):
+    project = hub.projects[0]
+    hub.activate(project)
+    for number in range(100):
+        xsync.emit(f"line {number}")
+    hub.open(project)
+    drawn = hub.screen.written[-1]
+    assert "line 99" in drawn and "line 0\n" not in drawn  # only what fits below the fixed rows
+    hub.back()
+    assert hub.view is None and "\033[r" in hub.screen.written[-1]
+
+
+@pytest.mark.parametrize("colors", [False, True])
+@pytest.mark.parametrize("width", [1, 20, 60, 120, 200])
+def test_overview_rows_fit_and_mark_the_highlighted_project(hub, tmp_path, monkeypatch, width, colors):
+    monkeypatch.setattr(xsync, "colors_on", lambda: colors)
+    hub.register(make_project_folder(tmp_path / "work" / "a-rather-long-project-name", "host:some/remote/folder/"))
+    hub.register(tmp_path / "work" / "gone")
+    hub.projects[0].changes = 28
+    hub.selected = 1
+    rows = [visible(row) for row in hub.table_rows(width)]
+    assert len(rows) == 3 and all(len(row) == width for row in rows)
+    if width >= 120:
+        assert rows[1].startswith(" › a-rather-long-project-name") and "SSH" in rows[1]
+        assert rows[0].startswith("   alpha") and "LOCAL" in rows[0] and "28 changes" in rows[0]
+        assert "folder not found" in rows[2]
+
+
+def test_overview_without_projects_says_what_to_do(tmp_path):
+    app = xsync.App(tmp_path / "projects.toml", screen=FakeScreen())
+    assert "Press a to add one" in app.table_rows(120)[0]
+    app.on_overview_key("down")                           # nothing to move to; must not fail
+    app.on_overview_key("o")
+    assert app.view is None
+
+
+def test_overview_keys_move_open_and_go_back(hub, tmp_path):
+    hub.register(make_project_folder(tmp_path / "work" / "beta", "host:projects/beta/"))
+    hub.on_overview_key("down")
+    hub.on_overview_key("down")                           # stops at the last row
+    assert hub.selected == 1
+    hub.on_overview_key("up")
+    hub.on_overview_key("k")                              # stops at the first row
+    assert hub.selected == 0
+    hub.on_overview_key("j")
+    hub.on_overview_key("\n")
+    assert hub.view is hub.projects[1] and hub.view.touched
+    hub.on_project_key("esc")
+    assert hub.view is None
+
+    hub.on_overview_key("h")
+    assert any("highlight" in note for note in hub.notes)
+    hub.on_overview_key("v")
+    assert not hub.pretty and all(project.verbose for project in hub.projects)
+    hub.on_overview_key("x")
+    assert [project.name for project in hub.projects] == ["alpha"]
+
+
+def test_overview_summary_counts_states(hub, tmp_path):
+    hub.register(tmp_path / "work" / "gone")
+    hub.projects[0].observer = object()                   # as if watching
+    hub.projects[0].changes = 4
+    hub.summarize()
+    assert hub.panel.name == "2 projects"
+    assert hub.panel.state == "1 watching, 1 with a problem"
+    assert hub.panel.mode == "idle" and hub.panel.level == "problem"
+    assert hub.panel.detail == "4 changes"
+    hub.projects[0].observer = None
+
+
+def test_adding_a_project_by_folder(hub, tmp_path, monkeypatch):
+    beta = make_project_folder(tmp_path / "work" / "beta", "host:projects/beta/")
+    (beta / "deep").mkdir()
+    answers = iter([str(beta / "deep").replace("/", "/", 1), str(tmp_path / "work"), None])
+    monkeypatch.setattr(hub, "ask", lambda label: next(answers))
+
+    hub.on_overview_key("a")                              # a folder inside the project finds its root
+    assert [project.root for project in hub.projects][-1] == beta and hub.selected == 1
+    hub.on_overview_key("a")                              # no config in or above this folder
+    assert len(hub.projects) == 2 and "No .xsync.toml" in hub.notes[0]
+    hub.on_overview_key("a")                              # cancelled
+    assert len(hub.projects) == 2
+
+
+@needs_gnu_rsync
+def test_actions_from_the_overview_apply_to_the_highlighted_project(hub):
+    project = hub.projects[0]
+    hub.on_overview_key("c")
+    assert "3 differences" in project.panel.state and tree(Path(project.remote)) == set()
+    hub.on_overview_key("s")
+    assert tree(Path(project.remote)) == {"a.txt", "sub/b.txt"}
+    assert "alpha" in hub.notes[0]
+
+
+def test_actions_on_an_unusable_project_only_explain(hub, tmp_path):
+    hub.register(tmp_path / "work" / "gone")
+    hub.selected = 1
+    for key in ("s", "c", "w"):
+        hub.on_overview_key(key)
+        assert "folder not found" in hub.notes[0]
+    hub.open(hub.projects[1])
+    hub.on_project_key("s")
+    assert "folder not found" in hub.projects[1].log[-1]
 
 
 # --- setup info ----------------------------------------------------------------
