@@ -13,6 +13,7 @@ Usage:
     xsync --watch --interval 5 # watch with a 5-second debounce window
 """
 
+import os
 import sys
 import shlex
 import subprocess
@@ -120,6 +121,25 @@ def is_ssh_remote(remote: str) -> bool:
     if remote.startswith("/") or remote.startswith("~/") or remote.startswith("./"):
         return False
     return ":" in remote
+
+
+def normalize_remote(remote: str) -> str:
+    """Expand ~ for local remotes and make sure the remote ends with a slash."""
+    if not is_ssh_remote(remote):
+        remote = os.path.expanduser(remote)
+    return remote if remote.endswith("/") else remote + "/"
+
+
+def unsafe_remote_reason(remote: str) -> str | None:
+    """Return why remote is too dangerous for a --delete sync, or None if it is fine."""
+    path = remote.split(":", 1)[1] if is_ssh_remote(remote) else os.path.expanduser(remote)
+    stripped = path.rstrip("/")
+    if not stripped:
+        return "the remote path is empty or the filesystem root"
+    # "." is the home directory over SSH and the current directory locally
+    if os.path.normpath(stripped) in ("~", ".", str(Path.home())):
+        return "the remote path is a home (or the current) directory"
+    return None
 
 
 def build_remote_rm_command(remote_base: str, rels: list[str]) -> str:
@@ -333,7 +353,16 @@ def main():
         print("❌ 'remote' not set in .xsync.toml.")
         sys.exit(1)
 
+    remote = normalize_remote(remote)
     exclude_patterns = config.get("exclude", [])
+
+    # Full syncs (including the initial one in watch mode) run rsync --delete
+    if watch or not file_arg:
+        reason = unsafe_remote_reason(remote)
+        if reason:
+            print(f"❌ Refusing to sync with --delete to '{remote}': {reason}.")
+            print("   Point 'remote' in .xsync.toml at a dedicated project directory.")
+            sys.exit(1)
 
     if watch:
         raw_interval = parse_flag_value(args, "--interval", None)
