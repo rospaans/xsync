@@ -6,6 +6,18 @@
 
 A small `rsync` wrapper for syncing a local project directory to a remote destination. One command, one config file per project.
 
+## Recent changes: hardened for SSH remotes
+
+SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now the primary setup. Local paths keep working.
+
+- **Safe remote deletes**: `--watch` quotes deleted paths with `shlex.quote` and passes them after `rm -f --`, so odd filenames can no longer break or inject commands. A failed delete prints a warning.
+- **Single-file sync creates missing folders**: `xsync path/to/new/file.py` works even if `path/to/new/` does not exist on the remote yet.
+- **`--delete` guard**: full syncs refuse to run when the remote path is empty, `/`, `~`, `.` or a home directory. A missing trailing `/` on `remote` is added automatically.
+- **Compression only over SSH**: `-z` is dropped for local and mounted paths.
+- **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) is reported within 5 seconds, before any sync and before `--watch` starts.
+- **rsync flavor**: new optional `rsync = "/path/to/rsync"` key. Defaults to `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`. A one-line warning is printed if it is not GNU rsync 3.x (recent macOS ships openrsync).
+- **Tests**: `python -m pytest tests`.
+
 ## What it does
 
 `xsync` reads a `.xsync.toml` file from the project root and runs `rsync` against the `remote` target declared there. The logic lives in a single script on your `$PATH`; each project only needs a declarative config. It works from any terminal and any editor.
@@ -17,7 +29,9 @@ A small `rsync` wrapper for syncing a local project directory to a remote destin
 ## Requirements
 
 - Python 3.11+ (for `tomllib` in the standard library)
-- `rsync` (preinstalled on macOS and most Linux distributions)
+- `rsync`, preferably GNU rsync 3.x (`brew install rsync` on macOS, which ships openrsync)
+- For SSH remotes: key-based login to a host alias defined in `~/.ssh/config`
+- Optional: `watchdog` for `--watch` (installed by `install.sh`)
 
 ## Installation
 
@@ -37,6 +51,8 @@ xsync path/to/file.py      # sync a single file
 xsync --init               # create a starter .xsync.toml in current dir
 xsync --dry-run            # show what would sync, no transfer
 xsync file.py --dry-run    # dry-run single-file mode
+xsync --watch              # watch for changes and sync automatically
+xsync --watch --interval 5 # watch with a 5-second debounce window
 ```
 
 `xsync` walks up from the current directory to find `.xsync.toml`, so you can run it from any subdirectory of the project.
@@ -46,9 +62,13 @@ xsync file.py --dry-run    # dry-run single-file mode
 `.xsync.toml` lives at the project root. Copy from `.xsync.toml.example` or generate one with `xsync --init`.
 
 ```toml
-# Remote destination: local path (e.g. mounted volume) or SSH target
-remote = "/Volumes/your-volume/your-project/"
-# remote = "user@host:/path/to/project/"
+# Remote destination: SSH target, where the host is an alias from ~/.ssh/config
+remote = "myhost:/path/to/project/"
+# Alternative: a local path (e.g. mounted volume)
+# remote = "/Volumes/your-volume/your-project/"
+
+# rsync binary to use (default: /opt/homebrew/bin/rsync if present, else rsync from PATH)
+# rsync = "/opt/homebrew/bin/rsync"
 
 # Patterns to exclude (rsync exclude-from syntax)
 exclude = [
@@ -63,12 +83,13 @@ exclude = [
 ]
 ```
 
-The `remote` field accepts anything `rsync` accepts: a local path (mounted volume, external drive) or an SSH target in the form `user@host:/path/`.
+The `remote` field is an SSH target in the form `host:/path/` (or `user@host:/path/`), or a local path (mounted volume, external drive). For SSH, define the host in `~/.ssh/config` with key authentication; `ControlMaster` multiplexing makes repeated syncs and `--watch` much faster.
 
 ## How it works
 
-- **Full sync** (`xsync`): invokes `rsync -avz --delete` with the exclude list. The remote becomes an exact mirror of the local project, minus excluded paths.
-- **Single-file sync** (`xsync path/to/file`): transfers just that file, preserving its relative path under the remote root.
+- **Full sync** (`xsync`): invokes `rsync -av --delete` with the exclude list (plus `-z` over SSH). The remote becomes an exact mirror of the local project, minus excluded paths.
+- **Single-file sync** (`xsync path/to/file`): transfers just that file, preserving its relative path under the remote root and creating missing folders.
+- **Watch** (`xsync --watch`): one full sync, then pushes changed files in batches and removes deleted files from the remote.
 
 ## Setting up a new project
 
@@ -87,8 +108,11 @@ Add `.xsync.toml` to the project's `.gitignore` if the remote path is personal, 
 **No `.xsync.toml` found**
 Either `cd` into a project that has one, or run `xsync --init` to create one here.
 
-**Remote not found**
-The mounted volume or SSH host is not reachable. Mount the volume or verify the host, then retry.
+**Cannot reach host over SSH**
+The host is down, your key is not loaded (`ssh-add`), or the VPN is not connected. Check with `ssh <host> true`.
+
+**Refusing to sync with --delete**
+The `remote` path is empty, `/`, or a home directory. Point it at a dedicated project directory.
 
 **File is outside repo**
 The file path passed to `xsync` is not inside the project root. `xsync` only syncs files within the project.
