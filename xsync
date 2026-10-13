@@ -14,6 +14,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import shlex
 import subprocess
@@ -71,15 +72,33 @@ def write_exclude_file(repo_root: Path, patterns: list[str]) -> Path:
     return exclude_path
 
 
+HOMEBREW_RSYNC = "/opt/homebrew/bin/rsync"
+
+
+def resolve_rsync(config: dict) -> str:
+    """Pick the rsync binary: config key, then Homebrew's, then whatever is on PATH."""
+    configured = config.get("rsync")
+    if configured:
+        return os.path.expanduser(configured)
+    return HOMEBREW_RSYNC if os.path.exists(HOMEBREW_RSYNC) else "rsync"
+
+
+def is_gnu_rsync3(version_output: str) -> bool:
+    """True if `rsync --version` output looks like GNU rsync 3.x (not openrsync)."""
+    if "openrsync" in version_output:
+        return False
+    return re.match(r"rsync\s+version\s+3\.", version_output) is not None
+
+
 def rsync_flags(remote: str) -> str:
     """Base rsync flags. Compression only pays off over the network."""
     return "-avz" if is_ssh_remote(remote) else "-av"
 
 
-def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool) -> int:
+def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, rsync: str = "rsync") -> int:
     """Sync entire repo to remote."""
     cmd = [
-        "rsync",
+        rsync,
         rsync_flags(remote),
         "--delete",
         f"--exclude-from={exclude_file}",
@@ -91,13 +110,13 @@ def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool) -
     return subprocess.run(cmd).returncode
 
 
-def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool) -> int:
+def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool, rsync: str = "rsync") -> int:
     """Sync a single file, preserving its relative path in the remote."""
     rel = file_path.resolve().relative_to(repo_root)
-    return sync_batch([str(rel)], repo_root, remote, dry_run)
+    return sync_batch([str(rel)], repo_root, remote, dry_run, rsync)
 
 
-def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False) -> int:
+def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False, rsync: str = "rsync") -> int:
     """Sync a batch of relative file paths using rsync --files-from.
 
     --files-from implies --relative, so missing parent directories are created.
@@ -105,7 +124,7 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     files_from = repo_root / ".xsync.files"
     files_from.write_text("\n".join(batch) + "\n")
     cmd = [
-        "rsync",
+        rsync,
         rsync_flags(remote),
         "--files-from", str(files_from),
         str(repo_root) + "/",
@@ -207,7 +226,7 @@ def make_excluded_checker(repo_root: Path, patterns: list[str]):
     return is_excluded
 
 
-def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float):
+def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float, rsync: str = "rsync"):
     try:
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
@@ -271,7 +290,7 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
 
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] Initial sync {repo_root}/ → {remote}")
-    rc = sync_full(repo_root, remote, exclude_file, dry_run=False)
+    rc = sync_full(repo_root, remote, exclude_file, dry_run=False, rsync=rsync)
     if rc != 0:
         print(f"[{timestamp}] ⚠️  Initial sync failed with code {rc}. Continuing watch anyway.")
     else:
@@ -307,7 +326,7 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
                 rm_rc = delete_from_remote(removals, remote)
             if batch:
                 print(f"[{timestamp}] Syncing {len(batch)} file(s): {', '.join(batch)}")
-                rc = sync_batch(batch, repo_root, remote)
+                rc = sync_batch(batch, repo_root, remote, rsync=rsync)
 
             if rc != 0:
                 print(f"[{timestamp}] ⚠️  rsync exited with code {rc}.")
@@ -368,6 +387,15 @@ def main():
     remote = normalize_remote(remote)
     exclude_patterns = config.get("exclude", [])
 
+    rsync = resolve_rsync(config)
+    try:
+        version = subprocess.run([rsync, "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        print(f"❌ rsync not found: {rsync}")
+        sys.exit(1)
+    if not is_gnu_rsync3(version):
+        print(f"⚠️  {rsync} is not GNU rsync 3.x; some flags may behave differently (brew install rsync).")
+
     # Full syncs (including the initial one in watch mode) run rsync --delete
     if watch or not file_arg:
         reason = unsafe_remote_reason(remote)
@@ -386,7 +414,7 @@ def main():
     if watch:
         raw_interval = parse_flag_value(args, "--interval", None)
         debounce = float(raw_interval) if raw_interval is not None else 2.0
-        cmd_watch(repo_root, remote, exclude_patterns, debounce)
+        cmd_watch(repo_root, remote, exclude_patterns, debounce, rsync)
         return
 
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -400,11 +428,11 @@ def main():
             print(f"❌ File is outside repo: {file_path}")
             sys.exit(1)
         print(f"[{timestamp}] {mode}Syncing {file_arg} → {remote}")
-        rc = sync_file(file_path, repo_root, remote, dry_run)
+        rc = sync_file(file_path, repo_root, remote, dry_run, rsync)
     else:
         exclude_file = write_exclude_file(repo_root, exclude_patterns)
         print(f"[{timestamp}] {mode}Syncing {repo_root}/ → {remote}")
-        rc = sync_full(repo_root, remote, exclude_file, dry_run)
+        rc = sync_full(repo_root, remote, exclude_file, dry_run, rsync)
         exclude_file.unlink(missing_ok=True)
 
     if rc == 0:
