@@ -12,7 +12,7 @@ import pytest
 
 import xsync
 from xsync import config as config_module, project as project_module, remote as remote_module
-from helpers import EXCLUDES, REPO, RSYNC, fake_editor, make_project_folder, needs_gnu_rsync, needs_rsync, run_ticks, tree
+from helpers import EXCLUDES, REPO, RSYNC, fake_editor, make_project_folder, needs_gnu_rsync, needs_rsync, run_ticks, run_ticks_until, tree
 
 
 @pytest.mark.parametrize("config, expected", [
@@ -144,13 +144,15 @@ def test_a_burst_leaves_the_remote_identical(watched):
     time.sleep(0.5)
     burst = subprocess.Popen([sys.executable, str(REPO / "tests" / "stress_edits.py"),
                               "--files", "3000", "--pause", "0", "--keep"], cwd=project.root, stdout=subprocess.DEVNULL)
-    run_ticks(project, 12)
+    run_ticks(project, 3)
     assert burst.wait() == 0
+    # How long the watcher takes to report everything differs per system; what matters is the end state
+    run_ticks_until(project, lambda: tree(dst) == tree(project.root) - {".xsync.toml"}, timeout=90)
     assert tree(dst) == tree(project.root) - {".xsync.toml"}
     assert len(tree(dst)) > 500
 
     shutil.rmtree(project.root / "xsync_stress_test")
-    run_ticks(project, 8)
+    run_ticks_until(project, lambda: not (dst / "xsync_stress_test").exists(), timeout=90)
     assert tree(dst) == {"a.txt", "sub/b.txt"}
     assert not (dst / "xsync_stress_test").exists()
 
@@ -183,6 +185,25 @@ def test_check_after_burst_mirrors_only_the_touched_folders(hub):
                          "sub/deep/untouched-stale.txt", "sub/ignored/remote-only.txt"}
     assert project.touched_dirs == set() and project.unchecked == 0
     assert "after a burst" in project.log[-1]
+
+
+def test_changes_shortly_after_a_burst_are_checked_too(hub, monkeypatch):
+    """The tail of a burst comes in small batches; within a minute of a burst those get a check as well."""
+    project = hub.projects[0]
+    checked = []
+    monkeypatch.setattr(project, "check_after_burst", lambda: checked.append(True))
+    project.observer = object()
+    project.touched_dirs, project.unchecked = {"sub"}, 3
+    project.last_event = time.monotonic() - 10
+
+    project.burst_at = time.monotonic() - 5                # a burst five seconds ago
+    project.tick(time.monotonic())
+    assert checked == [True]
+
+    project.burst_at = time.monotonic() - 600              # long ago: three changes are just three changes
+    project.tick(time.monotonic())
+    assert checked == [True]
+    project.observer = None
 
 
 def test_a_few_changes_do_not_trigger_the_check(hub, monkeypatch):

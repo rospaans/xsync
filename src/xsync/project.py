@@ -21,26 +21,18 @@ from .rsync import (
 from .ui import KEY_HELP, PROJECT_KEYS, Panel
 
 
+# Seconds between attempts while a project is offline, and between checks of a host that is up
 RETRY_SECONDS = 10
-
-
 HEARTBEAT_SECONDS = 60
-
-
 # After this many paths were sent in watch mode, the touched folders are checked once things
 # have been quiet for SETTLE_SECONDS; fewer than that are forgotten after FORGET_SECONDS
 BURST_PATHS = 100
-
-
 SETTLE_SECONDS = 3
-
-
 FORGET_SECONDS = 30
-
-
+# For this long after a burst, any further change is followed by another check: the tail of a
+# burst arrives in small batches, and those are as likely to have been reported incompletely
+BURST_WINDOW_SECONDS = 60
 IDLE = "in sync, watching for changes"
-
-
 # Lines of history kept per project, so its list can be shown again after looking elsewhere
 LOG_LINES = 2000
 
@@ -72,6 +64,7 @@ class Project:
         # (see check_after_burst); last_event is when the watcher last reported anything
         self.touched_dirs: set[str] = set()
         self.unchecked = 0
+        self.burst_at = float("-inf")  # when the last burst was seen
         self.last_event = time.monotonic()
         self.last_flush = self.last_beat = time.monotonic()
         self.error = ""  # why this project cannot be synced, if it cannot
@@ -384,6 +377,7 @@ class Project:
             self.deleted.clear()
             self.touched_dirs.clear()
         self.unchecked = 0
+        self.burst_at = float("-inf")
 
     def flush(self):
         """Send what the watcher collected since the last flush."""
@@ -420,6 +414,8 @@ class Project:
         elif self.reached(codes):
             self.count_changes(before)
             self.unchecked += len(batch) + len(removals)
+            if self.unchecked >= BURST_PATHS:
+                self.burst_at = time.monotonic()
         else:
             # Keep the changes and try again until the connection is back
             with self.lock:
@@ -457,6 +453,8 @@ class Project:
                             mirror_excludes=exclude_file, recursive=False)
         if self.reached([rc]):
             fixed = self.count_changes(before)
+            if fixed:
+                self.burst_at = time.monotonic()  # it was not settled yet; keep checking a while longer
             emit(f"checked {len(folders)} folder(s) after a burst: " + (f"{fixed} correction(s)" if fixed else "all in order"), "dim")
         else:
             with self.lock:
@@ -520,7 +518,8 @@ class Project:
             self.flush()
         quiet_for = time.monotonic() - self.last_event
         if self.watching and not self.offline and not self.pending and not self.deleted:
-            if self.unchecked >= BURST_PATHS and quiet_for >= SETTLE_SECONDS:
+            in_burst = time.monotonic() - self.burst_at < BURST_WINDOW_SECONDS
+            if self.unchecked >= (1 if in_burst else BURST_PATHS) and quiet_for >= SETTLE_SECONDS:
                 self.check_after_burst()
             elif self.unchecked and quiet_for >= FORGET_SECONDS:
                 # A few changes, long settled: the watcher is reliable at that pace

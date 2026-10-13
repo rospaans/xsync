@@ -142,6 +142,14 @@ def run_ticks(project, seconds: float):
         time.sleep(0.05)
 
 
+def run_ticks_until(project, done, timeout: float):
+    """Let a watched project work until done() is true, or the timeout passes."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and not done():
+        project.tick(time.monotonic())
+        time.sleep(0.05)
+
+
 def shown_lines(hub):
     """The list lines in the last thing drawn."""
     return re.findall(r"line \d+", visible(hub.screen.written[-1]))
