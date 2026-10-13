@@ -162,6 +162,21 @@ def test_batch_sync_and_delete_handle_awkward_filenames(tmp_path):
     assert tree(tmp_path) == {"src/keep.txt", "dst/keep.txt"}  # nothing injected
 
 
+@needs_gnu_rsync
+def test_delete_when_local_parent_folder_is_gone(tmp_path):
+    tmp_path = tmp_path.resolve()
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    (dst / "gone").mkdir(parents=True)
+    (dst / "gone" / "a.txt").write_text("x")
+    (dst / "keep.txt").write_text("x")
+    rsync = [xsync.resolve_rsync({})]
+
+    rc = xsync.sync_batch(["gone/a.txt"], src, str(dst) + "/", rsync=rsync, delete_missing=True)
+    assert rc == 0
+    assert tree(dst) == {"keep.txt"}
+
+
 # --- paths stay inside the remote project ----------------------------------
 
 def test_inside_remote_drops_escaping_paths():

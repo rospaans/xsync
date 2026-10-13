@@ -184,6 +184,11 @@ def parse_change(line: str) -> tuple[str, str]:
     return "message", line
 
 
+# rsync's complaints about source files that are gone. When deleting remote
+# copies of locally deleted files, that is the expected state, not a problem.
+VANISHED_MESSAGES = ("file has vanished:", "WARNING: parent dir is absent", "rsync warning: some files vanished")
+VANISHED_EXIT_CODE = 24
+
 CHANGE_MARKS = {"new": ("+", "green"), "updated": ("~", "yellow"), "deleted": ("-", "red")}
 
 
@@ -194,6 +199,7 @@ def run_rsync(cmd: list[str]) -> int:
     cmd = [cmd[0], "--out-format=%i %n%L", "--outbuf=L", *cmd[1:]]
     counts = {"new": 0, "updated": 0, "deleted": 0}
     seen_messages = set()
+    deleting_missing = "--delete-missing-args" in cmd
     start = time.monotonic()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     for line in proc.stdout:
@@ -203,6 +209,8 @@ def run_rsync(cmd: list[str]) -> int:
             mark, color = CHANGE_MARKS[kind]
             emit(f"{mark} {text}", color)
         elif kind == "message" and text not in seen_messages:
+            if deleting_missing and text.startswith(VANISHED_MESSAGES):
+                continue
             seen_messages.add(text)
             emit(f"! {text}", "yellow")
     rc = proc.wait()
@@ -272,9 +280,10 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     if delete_missing:
         cmd.insert(1, "--delete-missing-args")
     try:
-        return run_rsync(cmd)
+        rc = run_rsync(cmd)
     finally:
         files_from.unlink(missing_ok=True)
+    return 0 if delete_missing and rc == VANISHED_EXIT_CODE else rc
 
 
 INTERNAL_FILES = {".xsync.files", ".xsync.exclude"}
