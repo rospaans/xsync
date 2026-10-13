@@ -131,11 +131,25 @@ def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool, rsyn
     return sync_batch([str(rel)], repo_root, remote, dry_run, rsync)
 
 
+def inside_remote(rels: list[str]) -> list[str]:
+    """Drop relative paths that could resolve outside the remote project directory."""
+    safe = []
+    for rel in rels:
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            print(f"⚠️  Skipping path outside the project: {rel!r}")
+        else:
+            safe.append(rel)
+    return safe
+
+
 def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False, rsync: list[str] = RSYNC) -> int:
     """Sync a batch of relative file paths using rsync --files-from.
 
     --files-from implies --relative, so missing parent directories are created.
     """
+    batch = inside_remote(batch)
+    if not batch:
+        return 0
     files_from = repo_root / ".xsync.files"
     files_from.write_text("\n".join(batch) + "\n")
     cmd = [
@@ -203,6 +217,9 @@ def build_remote_rm_command(remote_base: str, rels: list[str]) -> str:
 
 def delete_from_remote(deleted_rels: list[str], remote: str) -> int:
     """Delete specific files from remote without a full rsync scan."""
+    deleted_rels = inside_remote(deleted_rels)
+    if not deleted_rels:
+        return 0
     if is_ssh_remote(remote):
         host, remote_base = remote.split(":", 1)
         rc = subprocess.run(["ssh", "-T", host, build_remote_rm_command(remote_base, deleted_rels)]).returncode
