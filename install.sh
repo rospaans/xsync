@@ -67,4 +67,4 @@ sed "1s|.*|#!${VENV_PYTHON}|" "$(dirname "$0")/$SCRIPT_NAME" > "$INSTALL_DIR/$SC
 chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 
 echo "Installed xsync to $INSTALL_DIR/$SCRIPT_NAME"
-echo "   Run 'xsync --init' to set up a project, or 'xsync --watch' to start watching."
+echo "   Run 'xsync' inside a project. Without a .xsync.toml it offers to create one."

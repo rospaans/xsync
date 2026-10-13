@@ -38,19 +38,15 @@ jobs:
           python -m pip install --quiet pytest
           python -m pytest tests -q
 
-      - name: Smoke test --init, full sync, single-file dry-run
+      - name: Smoke test --init, --help, --version, and no sync without a terminal
         shell: bash
         run: |
           set -euo pipefail
           SRC=$(mktemp -d)
-          DST=$(mktemp -d)
           cd "$SRC"
+          python "$GITHUB_WORKSPACE/xsync" --help
+          python "$GITHUB_WORKSPACE/xsync" --version
           python "$GITHUB_WORKSPACE/xsync" --init
-          # -i.bak form is portable across GNU sed (Linux) and BSD sed (macOS)
-          sed -i.bak "s|myhost:/path/to/project/|$DST/|" .xsync.toml
-          rm -f .xsync.toml.bak
-          echo hello > file.txt
-          python "$GITHUB_WORKSPACE/xsync" --dry-run
-          python "$GITHUB_WORKSPACE/xsync"
-          test -f "$DST/file.txt"
-          python "$GITHUB_WORKSPACE/xsync" file.txt --dry-run
+          test -f .xsync.toml
+          # xsync is interactive: without a terminal it must refuse to run
+          if python "$GITHUB_WORKSPACE/xsync"; then exit 1; fi

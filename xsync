@@ -8,22 +8,18 @@ an alias from ~/.ssh/config (key auth, ideally with ControlMaster so repeated
 syncs reuse one connection). A local path (e.g. a mounted volume) also works.
 
 Usage:
-    xsync                      # open the session: compare, then sync or watch with single keys
-    xsync --sync               # sync the entire project once and exit
-    xsync path/to/file.py      # sync a single file or folder
-    xsync --dry-run            # show what would be synced, no transfer
-    xsync file.py --dry-run    # dry-run for a single file or folder
-    xsync --watch              # open the session with watch mode already on
-    xsync --watch --interval 5 # watch with a 5-second debounce window
+    xsync                      # open the session in a terminal
+    xsync --verbose            # open the session showing rsync's raw output
     xsync --init               # create a starter .xsync.toml in current dir
-    xsync --status             # show the resolved setup and check the host; no sync
-    xsync --verbose            # show rsync's raw output instead of the summary
     xsync --version            # show the version
     xsync --help               # show this help
 
-Keys in the session: s sync, w watch on/off, c compare, f sync a file or folder,
-r reconnect, i info (the setup, as --status), e errors, q quit. Without a terminal (piped, scripted), plain
-`xsync` syncs once and exits.
+Everything else happens on single keys inside the session:
+    s  sync the whole project          r  check the connection, send what was queued
+    w  watch mode on/off               i  info: the resolved setup
+    c  compare, changing nothing       e  list recorded warnings and errors
+    f  sync one file or folder         v  verbose on/off (rsync's raw output)
+    h  help                            q  quit
 """
 
 __version__ = "0.2.0"
@@ -74,6 +70,9 @@ exclude = [
 # A local path instead of SSH (replaces the remote line above)
 # remote = "/Volumes/your-volume/your-project/"
 
+# Seconds watch mode collects changes before sending them (default 2)
+# interval = 2
+
 # Extra rsync flags. This set is for a server folder on a network share (CIFS/SMB)
 # that rejects permission, ownership and timestamp changes; see the README.
 # rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-dir-times", "--inplace", "--checksum"]
@@ -117,11 +116,9 @@ def is_gnu_rsync3(version_output: str) -> bool:
     return re.match(r"rsync\s+version\s+3\.", version_output) is not None
 
 
-# Set by main(): summarize rsync's output instead of passing it through.
-# Needs GNU rsync 3.x; --verbose and other rsync flavors keep the raw output.
+# Summarize rsync's output instead of passing it through. Needs GNU rsync 3.x;
+# switched off by --verbose, the v key, or another rsync flavor.
 PRETTY = False
-# Set by run_session(): prefix each output line with the time
-STAMP = False
 # Number of new, updated and deleted paths sent so far, and the counts of the last rsync run
 CHANGES = 0
 LAST_COUNTS = {"new": 0, "updated": 0, "deleted": 0}
@@ -131,8 +128,6 @@ PROBLEM_HOOK = None
 COLORS = {
     # 256-color blue and red: the basic ones are too dark on dark terminal themes
     "green": "32", "blue": "38;5;75", "red": "38;5;203", "yellow": "33", "magenta": "35", "dim": "2", "bold": "1",
-    # header badges, one per mode
-    "sync": "1;7;34", "dry-run": "1;7;33", "file": "1;7;36", "watch": "1;7;32", "offline": "1;7;35", "status": "1;7",
 }
 
 
@@ -148,9 +143,9 @@ def paint(text: str, color: str | None) -> str:
 
 
 def emit(text: str, color: str | None = None, note: str = ""):
-    """Print one line below the header: time-stamped in a session, indented otherwise."""
-    prefix = f"{datetime.now():%H:%M:%S}  " if STAMP else "  "
-    print(prefix + paint(text, color) + (paint(f"  ({note})", "dim") if note else ""), flush=True)
+    """Print one time-stamped line in the list below the fixed rows."""
+    line = f"{datetime.now():%H:%M:%S}  " + paint(text, color)
+    print(line + (paint(f"  ({note})", "dim") if note else ""), flush=True)
 
 
 def warn(text: str, color: str = "yellow"):
@@ -158,29 +153,6 @@ def warn(text: str, color: str = "yellow"):
     emit(f"! {text}", color)
     if PROBLEM_HOOK:
         PROBLEM_HOOK(text)
-
-
-def format_header(mode: str, name: str, remote: str, info: str = "", width: int | None = None) -> str:
-    """The header line: the mode, what is synced where, and optional details.
-
-    With a width, the line is shortened to fit: the middle part first, then
-    the details are dropped.
-    """
-    lead = f" {mode.upper()} " if colors_on() else f"xsync {mode}"
-    middle = f"{name} → {remote}"
-    if width is not None:
-        def length() -> int:
-            return len(lead) + 2 + len(middle) + (2 + len(info) if info else 0)
-        if length() > width:
-            keep = max(len(middle) - (length() - width), 30)
-            if keep < len(middle):
-                middle = middle[:keep - 1] + "…"
-        if length() > width:
-            info = ""
-        if length() > width:
-            middle = middle[:max(width - len(lead) - 3, 0)] + "…"
-    line = paint(lead, mode) + "  " + paint(middle, "bold")
-    return line + ("  " + paint(info, "dim") if info else "")
 
 
 # Colors of the session bar (256-color codes)
@@ -192,8 +164,23 @@ BAR_TRANSPORT = "1;38;5;255;48;5;61"
 # The change counter on the right
 BAR_TAG = "1;38;5;255;48;5;240"
 BAR_DOT = {"ok": "38;5;78", "busy": "38;5;221", "problem": "38;5;176"}
-SESSION_KEYS = [("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("f", "Path"),
-                ("r", "Reconnect"), ("i", "Info"), ("e", "Errors"), ("q", "Quit")]
+# Two rows of buttons: what you do, and what you look at
+SESSION_KEYS = [
+    [("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("f", "Path"), ("r", "Reconnect")],
+    [("i", "Info"), ("e", "Errors"), ("v", "Verbose"), ("h", "Help"), ("q", "Quit")],
+]
+KEY_HELP = {
+    "s": "sync the whole project now",
+    "w": "watch mode on/off: on does a full sync, then sends changes as you make them",
+    "c": "compare with the server, like git status; changes nothing",
+    "f": "sync one file or folder: type, paste or drag a path, then Enter",
+    "r": "check the connection now and send what was queued",
+    "i": "info: project, remote, host, rsync and flags in use",
+    "e": "list recorded warnings and errors, clear the problem line",
+    "v": "verbose on/off: show rsync's raw output",
+    "h": "this help",
+    "q": "quit (Ctrl+C works too)",
+}
 # Buttons: a light key cap next to a darker label; the cap is colored to show state
 BUTTON_CAP, BUTTON_CAP_ON, BUTTON_CAP_ALERT = "1;38;5;16;48;5;252", "1;38;5;16;48;5;78", "1;38;5;16;48;5;176"
 BUTTON_LABEL = "38;5;255;48;5;238"
@@ -217,19 +204,18 @@ def segments_length(segments: list[tuple[str, str]]) -> int:
 class Screen:
     """The session display.
 
-    In a terminal: a status bar, a row of keys and a message line stay fixed at
-    the top (using a scroll region) while changes scroll below, and single key
-    presses are read without Enter. Otherwise a header is printed once and
-    there is no key input.
+    A status bar, two rows of buttons and a message line stay fixed at the top
+    of the terminal (using a scroll region) while changes scroll below, and
+    single key presses are read without Enter.
     """
 
-    HEADER_ROWS = 5
+    HEADER_ROWS = 6
 
-    def __init__(self, name: str, remote: str, transport: str, interactive: bool):
+    def __init__(self, name: str, remote: str, transport: str):
         self.name, self.remote, self.transport = name, remote, transport
-        self.interactive = interactive
         self.mode, self.state, self.level, self.detail = "idle", "starting…", "busy", ""
         self.watching = False
+        self.verbose = False
         self.message, self.message_color = "", "dim"
         self._typed: deque[str] = deque()
         self._terminal_settings = None
@@ -267,25 +253,29 @@ class Screen:
         gap = max(width - segments_length(left) - segments_length(right), 0)
         return styled(left + [(" " * gap, "")] + right, BAR_BACKGROUND)
 
-    def key_row(self, width: int) -> str:
-        """The keys as a row of buttons."""
+    def key_rows(self, width: int) -> list[str]:
+        """The keys as two rows of buttons."""
         plain = not colors_on()
-        segments = [(" ", "")]
-        for key, label in SESSION_KEYS:
-            cap = BUTTON_CAP
-            if key == "w":
-                label = "Watch on" if self.watching else "Watch off"
-                cap = BUTTON_CAP_ON if self.watching else BUTTON_CAP
-            elif key == "r" and self.mode == "offline":
-                cap = BUTTON_CAP_ALERT
-            if plain:
-                item = [(f"[{key}] {label}", ""), ("   ", "")]
-            else:
-                item = [(f" {key} ", cap), (f" {label} ", BUTTON_LABEL), ("  ", "")]
-            if segments_length(segments) + segments_length(item) > width:
-                break
-            segments += item
-        return styled(segments)
+        switched_on = {"w": self.watching, "v": self.verbose}
+        rows = []
+        for keys in SESSION_KEYS:
+            segments = [(" ", "")]
+            for key, label in keys:
+                cap = BUTTON_CAP
+                if key in switched_on:
+                    label += " on" if switched_on[key] else " off"
+                    cap = BUTTON_CAP_ON if switched_on[key] else BUTTON_CAP
+                elif key == "r" and self.mode == "offline":
+                    cap = BUTTON_CAP_ALERT
+                if plain:
+                    item = [(f"[{key}] {label}", ""), ("   ", "")]
+                else:
+                    item = [(f" {key} ", cap), (f" {label} ", BUTTON_LABEL), ("  ", "")]
+                if segments_length(segments) + segments_length(item) > width:
+                    break
+                segments += item
+            rows.append(styled(segments))
+        return rows
 
     def message_row(self, width: int) -> str:
         """The latest problem or the input prompt; empty when there is nothing to say."""
@@ -293,7 +283,7 @@ class Screen:
 
     def draw(self, clear: bool = False):
         size = shutil.get_terminal_size()
-        rows = [self.bar(size.columns), "", self.key_row(size.columns), self.message_row(size.columns),
+        rows = [self.bar(size.columns), "", *self.key_rows(size.columns), self.message_row(size.columns),
                 paint("─" * (size.columns - 1), "dim")]
         top = self.HEADER_ROWS + 1
         # Setting the scroll region moves the cursor, so save and restore it
@@ -311,21 +301,16 @@ class Screen:
             self.detail = detail
         if mode is not None:
             self.mode = mode
-        if self.interactive:
-            self.draw()
+        self.draw()
 
     def set_message(self, text: str, color: str = "magenta"):
         self.message, self.message_color = text, color
-        if self.interactive:
-            self.draw()
+        self.draw()
 
     # --- keys
 
     def read_key(self, timeout: float) -> str | None:
-        """Wait up to timeout seconds for a key press. Without a terminal, just wait."""
-        if not self.interactive:
-            time.sleep(timeout)
-            return None
+        """Wait up to timeout seconds for a key press."""
         if not self._typed:
             ready, _, _ = select.select([sys.stdin], [], [], timeout)
             if not ready:
@@ -362,9 +347,6 @@ class Screen:
     # --- setup and teardown
 
     def __enter__(self):
-        if not self.interactive:
-            print(format_header("watch", self.name, self.remote, self.transport), flush=True)
-            return self
         import termios
         import tty
         self._terminal_settings = termios.tcgetattr(sys.stdin.fileno())
@@ -375,13 +357,12 @@ class Screen:
         return self
 
     def __exit__(self, *exc):
-        if self.interactive:
-            import termios
-            if hasattr(signal, "SIGWINCH"):
-                signal.signal(signal.SIGWINCH, signal.SIG_DFL)
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._terminal_settings)
-            sys.stdout.write("\0337\033[r\0338\033]0;\007")
-            sys.stdout.flush()
+        import termios
+        if hasattr(signal, "SIGWINCH"):
+            signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._terminal_settings)
+        sys.stdout.write("\0337\033[r\0338\033]0;\007")
+        sys.stdout.flush()
         return False
 
 
@@ -436,14 +417,13 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
     counts = {"new": 0, "updated": 0, "deleted": 0}
     seen_messages = set()
     deleting_missing = "--delete-missing-args" in cmd
-    start = time.monotonic()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     for line in proc.stdout:
         kind, text = parse_change(line.rstrip("\n"))
         if kind in counts:
             counts[kind] += 1
             mark, color = CHANGE_MARKS[kind]
-            emit(f"{mark} {text}", color, note="not synced" if dry_run and STAMP else "")
+            emit(f"{mark} {text}", color, note="not synced" if dry_run else "")
         elif kind == "message" and not quiet and text not in seen_messages:
             if deleting_missing and text.startswith(VANISHED_MESSAGES):
                 continue
@@ -453,10 +433,6 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
     LAST_COUNTS.update(counts)
     if not dry_run:
         CHANGES += sum(counts.values())
-    if not STAMP:
-        would = "would be " if dry_run else ""
-        changes = ", ".join(f"{n} {would}{kind}" for kind, n in counts.items() if n)
-        print(paint(f"{changes or 'Already up to date'} · {time.monotonic() - start:.1f}s", "dim"), flush=True)
     return rc
 
 
@@ -682,20 +658,24 @@ def make_excluded_checker(repo_root: Path, patterns: list[str]):
 
 
 RETRY_SECONDS = 10
+# Seconds watch mode collects changes before sending them; `interval` in .xsync.toml overrides it
+DEFAULT_INTERVAL = 2.0
 HEARTBEAT_SECONDS = 60
 IDLE = "in sync, watching for changes"
 
 
 def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float,
-                rsync: list[str] = RSYNC, watch: bool = False, interactive: bool = False, status=None):
+                rsync: list[str], status, can_summarize: bool, notices: list[str]):
     """The session: compare, sync and watch on single key presses.
 
-    Without a terminal there are no keys, and this is plain watch mode.
+    status returns the setup rows for the info key. can_summarize says whether
+    rsync supports the summarized output (GNU rsync 3.x). notices are warnings
+    from startup, shown once the screen is up.
     """
-    global STAMP, PROBLEM_HOOK
-    STAMP = True
+    global PROBLEM_HOOK
     ssh = is_ssh_remote(remote)
-    screen = Screen(repo_root.name, remote, "ssh" if ssh else "local", interactive)
+    screen = Screen(repo_root.name, remote, "ssh" if ssh else "local")
+    screen.verbose = not PRETTY
     is_excluded = make_excluded_checker(repo_root, exclude_patterns)
     pending: set[str] = set()
     deleted: set[str] = set()
@@ -750,7 +730,7 @@ def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debou
         if reached([rc]):
             if CHANGES != before:
                 last_change = clock()
-            elif rc == 0:
+            elif rc == 0 and PRETTY:
                 emit("already up to date", "dim")
             resting = (f"in sync at {clock()[:5]}", "ok") if rc == 0 else (f"sync had errors at {clock()[:5]}", "problem")
         rest()
@@ -759,7 +739,9 @@ def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debou
         nonlocal resting
         screen.set_status("comparing…", "busy")
         rc = sync_full(repo_root, remote, exclude_file, True, rsync, quiet=offline)
-        if reached([rc]):
+        if reached([rc]) and not PRETTY:
+            resting = (f"compared at {clock()[:5]}", "busy")  # raw output: the count is not known
+        elif not offline:
             differences = sum(LAST_COUNTS.values())
             if differences:
                 emit(f"{differences} difference(s), nothing changed; press s to sync", "dim")
@@ -775,9 +757,6 @@ def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debou
             from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
         except ImportError:
-            if not interactive:
-                print("error: watchdog is not installed. Run: pip install watchdog")
-                sys.exit(1)
             warn("watch mode needs watchdog, which is not installed (pip install watchdog)", "magenta")
             return
 
@@ -901,7 +880,7 @@ def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debou
         if reached([rc]):
             if CHANGES != before:
                 last_change = clock()
-            elif rc == 0:
+            elif rc == 0 and PRETTY:
                 emit(f"{rel}: already up to date", "dim")
         rest()
 
@@ -940,7 +919,24 @@ def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debou
             emit(f"{label.ljust(11)} {value}", "dim")
         rest()
 
+    def toggle_verbose():
+        global PRETTY
+        if not can_summarize:
+            warn("the summarized output needs GNU rsync 3.x; staying verbose", "magenta")
+            return
+        PRETTY = not PRETTY
+        screen.verbose = not PRETTY
+        emit("verbose on: showing rsync's raw output" if screen.verbose else "verbose off", "dim")
+        rest()
+
+    def show_help():
+        emit(f"xsync {__version__}", "bold")
+        for keys in SESSION_KEYS:
+            for key, _ in keys:
+                emit(f"{key}   {KEY_HELP[key]}", "dim")
+
     actions = {"s": full_sync, "c": compare, "f": sync_one, "e": show_problems, "i": show_status,
+               "v": toggle_verbose, "h": show_help,
                "r": lambda: check_connection(announce=True),
                "w": lambda: stop_watch() if screen.watching else start_watch()}
 
@@ -948,23 +944,22 @@ def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debou
     PROBLEM_HOOK = record_problem
     try:
         with screen:
-            if watch:
-                start_watch()
-            else:
-                compare()
+            for notice in notices:
+                warn(notice)
+            compare()
             last_flush = last_beat = time.monotonic()
             while True:
-                key = screen.read_key(0.2 if interactive else debounce)
+                key = screen.read_key(0.2)
                 if key == "q":
                     break
                 if key in actions:
                     actions[key]()
                 now = time.monotonic()
-                if screen.watching and now - last_flush >= (RETRY_SECONDS if offline else debounce) - 0.05:
+                if screen.watching and now - last_flush >= (RETRY_SECONDS if offline else debounce):
                     last_flush = now
                     flush()
                 # Notice a dropped connection without waiting for the next change
-                if interactive and now - last_beat >= (RETRY_SECONDS if offline else HEARTBEAT_SECONDS):
+                if now - last_beat >= (RETRY_SECONDS if offline else HEARTBEAT_SECONDS):
                     last_beat = now
                     check_connection(announce=False)
     except KeyboardInterrupt:
@@ -993,6 +988,7 @@ def status_rows(repo_root: Path, config: dict, remote: str, rsync: list[str], ve
     else:
         reachable = "reachable" if ssh_reachable(remote, rsync, quiet=True) else "not reachable"
     rows = [
+        ("version", f"xsync {__version__}"),
         ("project", str(repo_root)),
         ("config", str(repo_root / ".xsync.toml")),
         ("remote", f"{remote}  ({'ssh' if ssh else 'local path'})"),
@@ -1001,18 +997,10 @@ def status_rows(repo_root: Path, config: dict, remote: str, rsync: list[str], ve
         ("rsync", f"{rsync[0]}  ({flavor})"),
         ("rsync_args", " ".join(config.get("rsync_args", [])) or "none"),
         ("exclude", f"{len(config.get('exclude', []))} patterns"),
+        ("interval", f"{float(config.get('interval', DEFAULT_INTERVAL)):g}s between watch batches"),
         ("watch mode", watching),
     ]
     return rows, reason is None and reachable in ("reachable", "folder exists")
-
-
-def cmd_status(repo_root: Path, config: dict, remote: str, rsync: list[str], version: str) -> int:
-    """Show the resolved setup and check the host, without syncing anything."""
-    rows, ok = status_rows(repo_root, config, remote, rsync, version)
-    print(format_header("status", repo_root.name, remote))
-    for label, value in rows:
-        print(f"  {paint(label.ljust(11), 'dim')} {value}")
-    return 0 if ok else 1
 
 
 def cmd_init():
@@ -1023,19 +1011,29 @@ def cmd_init():
         sys.exit(1)
     target.write_text(STARTER_CONFIG)
     print(f"Created {target}")
-    print("Edit the 'remote' field to point to your destination.")
+    print("Edit the 'remote' line in it to point to your destination.")
 
 
-def parse_flag_value(args: list[str], flag: str, default):
-    """Return the value after --flag if present, else default."""
-    if flag in args:
-        idx = args.index(flag)
-        if idx + 1 < len(args):
-            return args[idx + 1]
-    return default
+def offer_init():
+    """No config found: offer to create one on a key press, then exit."""
+    import termios
+    import tty
+    print("No .xsync.toml found in this folder or any parent.")
+    print(f"Press i to create a starter config in {Path.cwd()}, or any other key to quit.")
+    fd = sys.stdin.fileno()
+    settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        key = os.read(fd, 1).decode("utf-8", "ignore")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, settings)
+    if key != "i":
+        sys.exit(1)
+    cmd_init()
+    print("Then run `xsync` again.")
 
 
-KNOWN_FLAGS = {"--init", "--sync", "--dry-run", "--watch", "--interval", "--status", "--verbose", "--version", "--help", "-h"}
+KNOWN_FLAGS = {"--init", "--verbose", "--version", "--help", "-h"}
 
 
 def main():
@@ -1049,31 +1047,25 @@ def main():
         print(f"xsync {__version__}")
         return
 
-    # Never fall through to a sync on a mistyped option
-    unknown = [a for a in args if a.startswith("-") and a not in KNOWN_FLAGS]
+    # Syncing only ever happens on a key press inside the session
+    unknown = [a for a in args if a not in KNOWN_FLAGS]
     if unknown:
-        print(f"error: unknown option: {' '.join(unknown)}")
-        print("   Run `xsync --help` for usage.")
+        print(f"error: unknown argument: {' '.join(unknown)}")
+        print("   Run `xsync` and use the keys, or `xsync --help`.")
         sys.exit(2)
 
     if "--init" in args:
         cmd_init()
         return
 
-    watch = "--watch" in args
-    dry_run = "--dry-run" in args
-    interval_value = parse_flag_value(args, "--interval", None)
-    positional = [a for a in args if not a.startswith("-") and a != interval_value]
-    if len(positional) > 1:
-        print(f"error: expected at most one file, got: {' '.join(positional)}")
-        sys.exit(2)
-    file_arg = positional[0] if positional else None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("error: xsync needs a terminal. Run `xsync` in a terminal and use the keys.")
+        sys.exit(1)
 
     result = find_config(Path.cwd())
     if result is None:
-        print("error: no .xsync.toml found in current directory or any parent.")
-        print("   Run `xsync --init` to create one here.")
-        sys.exit(1)
+        offer_init()
+        return
 
     repo_root, config = result
     remote = config.get("remote")
@@ -1091,26 +1083,23 @@ def main():
         print(f"error: rsync not found: {rsync}")
         sys.exit(1)
     global PRETTY
-    if is_gnu_rsync3(version):
-        PRETTY = "--verbose" not in args
-    else:
-        print(f"warning: {rsync} is not GNU rsync 3.x; some flags may behave differently (brew install rsync).")
+    notices = []
+    gnu = is_gnu_rsync3(version)
+    PRETTY = gnu and "--verbose" not in args
+    if not gnu:
+        notices.append(f"{rsync} is not GNU rsync 3.x; some flags may behave differently (brew install rsync)")
     extra_args = list(config.get("rsync_args", []))
     if is_ssh_remote(remote) and "RSYNC_RSH" not in os.environ:
         # Before the user's flags, so an -e in rsync_args still wins
         extra_args = ["-e", SSH_COMMAND, *extra_args]
     rsync = [rsync, *extra_args]
 
-    if "--status" in args:
-        sys.exit(cmd_status(repo_root, config, remote, rsync, version))
-
-    # Full syncs (including the initial one in watch mode) run rsync --delete
-    if watch or not file_arg:
-        reason = unsafe_remote_reason(remote)
-        if reason:
-            print(f"error: refusing to sync with --delete to '{remote}': {reason}.")
-            print("   Point 'remote' in .xsync.toml at a dedicated project directory.")
-            sys.exit(1)
+    # Full syncs run rsync --delete
+    reason = unsafe_remote_reason(remote)
+    if reason:
+        print(f"error: refusing to sync with --delete to '{remote}': {reason}.")
+        print("   Point 'remote' in .xsync.toml at a dedicated project directory.")
+        sys.exit(1)
 
     if is_ssh_remote(remote) and not ssh_reachable(remote, rsync):
         host = remote.split(":", 1)[0]
@@ -1119,33 +1108,9 @@ def main():
         print(f"   Try: rsync --list-only {host}:.")
         sys.exit(1)
 
-    # In a terminal, plain `xsync` and `xsync --watch` open the session
-    interactive = PRETTY and sys.stdin.isatty() and sys.stdout.isatty()
-    if watch or (interactive and not file_arg and not dry_run and "--sync" not in args):
-        debounce = float(interval_value) if interval_value is not None else 2.0
-        run_session(repo_root, remote, exclude_patterns, debounce, rsync, watch=watch, interactive=interactive,
-                    status=lambda: status_rows(repo_root, config, remote, rsync, version))
-        return
-
-    transport = "ssh" if is_ssh_remote(remote) else "local"
-    rel = "."
-    if file_arg:
-        rel = resolve_in_project(file_arg, repo_root)
-        if rel is None:
-            print(f"error: not found inside the project: {file_arg}")
-            sys.exit(1)
-
-    mode = "dry-run" if dry_run else ("file" if file_arg else "sync")
-    exclude_file = write_exclude_file(repo_root, exclude_patterns)
-    print(format_header(mode, repo_root.name, remote, transport), flush=True)
-    try:
-        rc = sync_path(rel, repo_root, remote, exclude_file, dry_run, rsync)
-    finally:
-        exclude_file.unlink(missing_ok=True)
-
-    if rc != 0:
-        print(paint(f"rsync exited with code {rc}", "magenta"))
-        sys.exit(rc)
+    run_session(repo_root, remote, exclude_patterns, float(config.get("interval", DEFAULT_INTERVAL)), rsync,
+                status=lambda: status_rows(repo_root, config, remote, rsync, version),
+                can_summarize=gnu, notices=notices)
 
 
 if __name__ == "__main__":
