@@ -331,6 +331,17 @@ def test_format_header_fits_width(width):
     assert line.startswith("xsync watch")
 
 
+@pytest.mark.parametrize("width", [25, 40, 80, 120, 200])
+def test_watch_bar_never_exceeds_terminal_width(width):
+    import re
+    header = xsync.PinnedHeader("a_project", "host:some/long/remote/folder/", "ssh")
+    for state, mode in [(xsync.IDLE, "watch"), ("syncing…", "watch"), ("offline, 3 queued, retrying", "offline")]:
+        header.state, header.detail, header.mode = state, "28 changes · last 15:44:16", mode
+        visible = re.sub(r"\033\[[0-9;]*m", "", header.bar(width))
+        assert len(visible) <= width
+        assert visible.startswith(f" {mode.upper()} ")
+
+
 def test_missing_parent_dirs(tmp_path):
     (tmp_path / "kept").mkdir()
     rels = ["gone/deep/a.txt", "gone/b.txt", "kept/c.txt", "top.txt"]

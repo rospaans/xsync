@@ -212,6 +212,9 @@ class PinnedHeader:
         room = width - length(left[:2]) - 2 - length(right)
         if len(left[2][0]) > room:
             left[2] = (left[2][0][:max(room - 1, 0)] + "…" if room > 0 else "", left[2][1])
+        over = length(left) + length(right) - width
+        if over > 0:  # very narrow: cut the state text rather than wrap
+            right[1] = (right[1][0][:max(len(right[1][0]) - over, 0)], right[1][1])
         gap = max(width - length(left) - length(right), 0)
 
         def render(segments) -> str:
