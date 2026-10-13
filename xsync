@@ -128,6 +128,13 @@ def is_ssh_remote(remote: str) -> bool:
     return ":" in remote
 
 
+def ssh_reachable(remote: str) -> bool:
+    """Check that the SSH host answers without prompting for a password."""
+    host = remote.split(":", 1)[0]
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"]
+    return subprocess.run(cmd).returncode == 0
+
+
 def normalize_remote(remote: str) -> str:
     """Expand ~ for local remotes and make sure the remote ends with a slash."""
     if not is_ssh_remote(remote):
@@ -368,6 +375,13 @@ def main():
             print(f"❌ Refusing to sync with --delete to '{remote}': {reason}.")
             print("   Point 'remote' in .xsync.toml at a dedicated project directory.")
             sys.exit(1)
+
+    if is_ssh_remote(remote) and not ssh_reachable(remote):
+        host = remote.split(":", 1)[0]
+        print(f"❌ Cannot reach '{host}' over SSH.")
+        print("   Host unreachable, key not loaded (ssh-add), or VPN not connected.")
+        print(f"   Try: ssh {host} true")
+        sys.exit(1)
 
     if watch:
         raw_interval = parse_flag_value(args, "--interval", None)
