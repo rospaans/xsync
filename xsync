@@ -112,8 +112,9 @@ def rsync_flags(remote: str) -> str:
 def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, rsync: list[str] = RSYNC) -> int:
     """Sync entire repo to remote."""
     cmd = [
-        *rsync,
+        rsync[0],
         rsync_flags(remote),
+        *rsync[1:],  # extra args go after -a so they can override it
         "--delete",
         f"--exclude-from={exclude_file}",
         str(repo_root) + "/",
@@ -138,8 +139,9 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     files_from = repo_root / ".xsync.files"
     files_from.write_text("\n".join(batch) + "\n")
     cmd = [
-        *rsync,
+        rsync[0],
         rsync_flags(remote),
+        *rsync[1:],  # extra args go after -a so they can override it
         "--files-from", str(files_from),
         str(repo_root) + "/",
         remote,

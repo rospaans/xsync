@@ -239,6 +239,16 @@ def test_rsync_args_are_passed_through(project):
 
 
 @needs_rsync
+def test_rsync_args_can_override_archive_flags(project):
+    src, dst = project
+    os.utime(src / "a.txt", (1_000_000_000, 1_000_000_000))  # 2001
+    write_config(src, str(dst) + "/", 'rsync_args = ["--no-times"]\n')
+    result = run_xsync(src)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (dst / "a.txt").stat().st_mtime > 1_500_000_000  # not copied from source
+
+
+@needs_rsync
 def test_full_sync_from_subdirectory(project):
     src, dst = project
     result = run_xsync(src / "sub")
