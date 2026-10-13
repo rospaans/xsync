@@ -365,7 +365,7 @@ xsync --help               # show usage
 Running `xsync` in a terminal opens a session. It first compares the project with the server, like `git status`, and changes nothing until you press a key:
 
 ```
- XSYNC   my_project  →   SSH  myhost:/data/projects/you/my_project/                   ● 3 differences at 15:52  ·  0 changes
+ XSYNC   my_project  →   SSH  myhost:/data/projects/you/my_project/                        ● 3 differences at 15:52    0 changes 
 
   s  Sync    w  Watch off    c  Compare    f  Path    r  Reconnect    i  Info    e  Errors    q  Quit
 
