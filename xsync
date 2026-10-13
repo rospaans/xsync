@@ -15,6 +15,7 @@ Usage:
     xsync file.py --dry-run    # dry-run single-file mode
     xsync --watch              # watch for changes and sync automatically
     xsync --watch --interval 5 # watch with a 5-second debounce window
+    xsync --help               # show this help
 """
 
 import os
@@ -408,8 +409,22 @@ def parse_flag_value(args: list[str], flag: str, default):
     return default
 
 
+KNOWN_FLAGS = {"--init", "--dry-run", "--watch", "--interval", "--help", "-h"}
+
+
 def main():
     args = sys.argv[1:]
+
+    if "--help" in args or "-h" in args:
+        print(__doc__.strip())
+        return
+
+    # Never fall through to a sync on a mistyped option
+    unknown = [a for a in args if a.startswith("-") and a not in KNOWN_FLAGS]
+    if unknown:
+        print(f"❌ Unknown option: {' '.join(unknown)}")
+        print("   Run `xsync --help` for usage.")
+        sys.exit(2)
 
     if "--init" in args:
         cmd_init()
@@ -417,7 +432,11 @@ def main():
 
     watch = "--watch" in args
     dry_run = "--dry-run" in args
-    positional = [a for a in args if not a.startswith("--")]
+    interval_value = parse_flag_value(args, "--interval", None)
+    positional = [a for a in args if not a.startswith("-") and a != interval_value]
+    if len(positional) > 1:
+        print(f"❌ Expected at most one file, got: {' '.join(positional)}")
+        sys.exit(2)
     file_arg = positional[0] if positional else None
 
     result = find_config(Path.cwd())

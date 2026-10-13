@@ -335,7 +335,10 @@ xsync --dry-run            # show what would sync, no transfer
 xsync file.py --dry-run    # dry-run single-file mode
 xsync --watch              # watch for changes and sync automatically
 xsync --watch --interval 5 # watch with a 5-second debounce window
+xsync --help               # show usage
 ```
+
+An unknown option is an error; xsync never falls back to a sync on a typo.
 
 `xsync` walks up from the current directory to find `.xsync.toml`, so you can run it from any subdirectory of the project.
 

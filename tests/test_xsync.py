@@ -301,6 +301,18 @@ def test_rsync_args_can_override_archive_flags(project):
     assert (dst / "a.txt").stat().st_mtime > 1_500_000_000  # not copied from source
 
 
+@pytest.mark.parametrize("args", [["--help"], ["-h"], ["--dryrun"], ["-n"], ["a.txt", "--bogus"], ["a.txt", "sub/b.txt"]])
+def test_help_and_bad_arguments_never_sync(project, args):
+    src, dst = project
+    result = run_xsync(src, *args)
+    assert tree(dst) == set()
+    if args[0] in ("--help", "-h"):
+        assert result.returncode == 0
+        assert "Usage:" in result.stdout
+    else:
+        assert result.returncode == 2
+
+
 @needs_rsync
 def test_full_sync_from_subdirectory(project):
     src, dst = project
