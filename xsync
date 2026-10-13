@@ -21,6 +21,8 @@ Usage:
 
 import os
 import re
+import shutil
+import signal
 import sys
 import subprocess
 import tomllib
@@ -102,15 +104,61 @@ def is_gnu_rsync3(version_output: str) -> bool:
 # Set by main(): summarize rsync's output instead of passing it through.
 # Needs GNU rsync 3.x; --verbose and other rsync flavors keep the raw output.
 PRETTY = False
+# Set by cmd_watch(): prefix each output line with the time
+STAMP = False
 
-COLORS = {"green": "32", "yellow": "33", "red": "31", "dim": "2"}
+COLORS = {"green": "32", "yellow": "33", "red": "31", "dim": "2", "bold": "1"}
 
 
-def paint(text: str, color: str) -> str:
+def paint(text: str, color: str | None) -> str:
     """Color text for a terminal; plain when piped or when NO_COLOR is set."""
-    if not sys.stdout.isatty() or "NO_COLOR" in os.environ:
+    if color is None or not sys.stdout.isatty() or "NO_COLOR" in os.environ:
         return text
     return f"\033[{COLORS[color]}m{text}\033[0m"
+
+
+def emit(text: str, color: str | None = None):
+    """Print one line below the header: time-stamped while watching, indented otherwise."""
+    prefix = f"{datetime.now():%H:%M:%S}  " if STAMP else "  "
+    print(prefix + paint(text, color), flush=True)
+
+
+class PinnedHeader:
+    """Keep one line fixed at the top of the terminal while output scrolls below it.
+
+    Uses a terminal scroll region. When output is not a terminal, or with raw
+    rsync output, the header is simply printed once.
+    """
+
+    def __init__(self, text: str):
+        self.text = text
+        self.pinned = PRETTY and sys.stdout.isatty()
+
+    def draw(self, clear: bool = False):
+        size = shutil.get_terminal_size()
+        line = paint(self.text[:size.columns - 1], "bold")
+        # Setting the scroll region moves the cursor, so save and restore it
+        start = "\033[2J" if clear else "\0337"
+        end = "\033[2;1H" if clear else "\0338"
+        sys.stdout.write(f"{start}\033[2;{size.lines}r\033[1;1H\033[2K{line}{end}")
+        sys.stdout.flush()
+
+    def __enter__(self):
+        if not self.pinned:
+            print(paint(self.text, "bold"), flush=True)
+            return self
+        self.draw(clear=True)
+        if hasattr(signal, "SIGWINCH"):
+            signal.signal(signal.SIGWINCH, lambda *_: self.draw())
+        return self
+
+    def __exit__(self, *exc):
+        if self.pinned:
+            if hasattr(signal, "SIGWINCH"):
+                signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+            sys.stdout.write("\0337\033[r\0338")
+            sys.stdout.flush()
+        return False
 
 
 def rsync_flags(remote: str) -> str:
@@ -140,7 +188,7 @@ CHANGE_MARKS = {"new": ("+", "green"), "updated": ("~", "yellow"), "deleted": ("
 
 
 def run_rsync(cmd: list[str]) -> int:
-    """Run rsync. With PRETTY, print one short line per change and a summary."""
+    """Run rsync. With PRETTY, print one short line per change instead of rsync's output."""
     if not PRETTY:
         return subprocess.run(cmd).returncode
     cmd = [cmd[0], "--out-format=%i %n%L", "--outbuf=L", *cmd[1:]]
@@ -153,15 +201,15 @@ def run_rsync(cmd: list[str]) -> int:
         if kind in counts:
             counts[kind] += 1
             mark, color = CHANGE_MARKS[kind]
-            print(paint(f"  {mark} {text}", color), flush=True)
+            emit(f"{mark} {text}", color)
         elif kind == "message" and text not in seen_messages:
             seen_messages.add(text)
-            print(paint(f"  ! {text}", "yellow"), flush=True)
+            emit(f"! {text}", "yellow")
     rc = proc.wait()
-    would = "would be " if "--dry-run" in cmd else ""
-    changes = ", ".join(f"{n} {would}{kind}" for kind, n in counts.items() if n)
-    elapsed = f"({time.monotonic() - start:.1f}s)"
-    print(paint(f"  {changes or 'Already up to date'} {elapsed}", "dim"), flush=True)
+    if not STAMP:
+        would = "would be " if "--dry-run" in cmd else ""
+        changes = ", ".join(f"{n} {would}{kind}" for kind, n in counts.items() if n)
+        print(paint(f"{changes or 'Already up to date'} · {time.monotonic() - start:.1f}s", "dim"), flush=True)
     return rc
 
 
@@ -192,7 +240,7 @@ def inside_remote(rels: list[str]) -> list[str]:
     safe = []
     for rel in rels:
         if not rel or rel.startswith("/") or ".." in Path(rel).parts or "\n" in rel or "\r" in rel:
-            print(f"⚠️  Skipping path outside the project: {rel!r}")
+            print(f"warning: skipping path outside the project: {rel!r}")
         else:
             safe.append(rel)
     return safe
@@ -281,7 +329,7 @@ def delete_from_remote(deleted_rels: list[str], repo_root: Path, remote: str, rs
     if is_ssh_remote(remote):
         rc = sync_batch(deleted_rels, repo_root, remote, rsync=rsync, delete_missing=True)
         if rc != 0:
-            print(f"⚠️  Remote delete failed: rsync exited with code {rc}.")
+            emit(f"! remote delete failed: rsync exited with code {rc}", "red")
         return rc
     for rel in inside_remote(deleted_rels):
         target = Path(remote.rstrip("/")) / rel
@@ -333,7 +381,7 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
     except ImportError:
-        print("❌ watchdog is not installed. Run: pip install watchdog")
+        print("error: watchdog is not installed. Run: pip install watchdog")
         sys.exit(1)
 
     is_excluded = make_excluded_checker(repo_root, exclude_patterns)
@@ -393,56 +441,51 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
 
     exclude_file = write_exclude_file(repo_root, exclude_patterns)
 
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] Initial sync {repo_root.name} → {remote}")
-    rc = sync_full(repo_root, remote, exclude_file, dry_run=False, rsync=rsync)
-    if rc != 0:
-        print(f"[{timestamp}] ⚠️  Initial sync failed with code {rc}. Continuing watch anyway.")
-    else:
-        print(f"[{timestamp}] ✅ Remote is up to date.")
-
-    print(f"Watching {repo_root.name} → {remote}  (debounce {debounce}s, Ctrl+C to stop)")
-
+    global STAMP
+    STAMP = True
+    header = f"xsync  {repo_root.name} → {remote}  (watching, Ctrl+C to stop)"
     try:
-        while True:
-            time.sleep(debounce)
-            with lock:
-                batch = list(pending)
-                pending.clear()
-                removals = list(deleted)
-                deleted.clear()
-
-            if not batch and not removals:
-                continue
-
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            # Anything "deleted" that still exists was overwritten (atomic write) — sync it
-            overwritten = [f for f in removals if (repo_root / f).exists()]
-            removals = [f for f in removals if not (repo_root / f).exists()]
-            batch = list(set(batch) | set(overwritten))
-
-            # Drop batch entries that no longer exist (temp files from atomic writes)
-            batch = [f for f in batch if (repo_root / f).exists()]
-
-            rc = 0
-            rm_rc = 0
-            if removals:
-                names = "" if PRETTY else f": {', '.join(removals)}"
-                print(f"[{timestamp}] Deleting {len(removals)} file(s){names}")
-                rm_rc = delete_from_remote(removals, repo_root, remote, rsync)
-            if batch:
-                names = "" if PRETTY else f": {', '.join(batch)}"
-                print(f"[{timestamp}] Syncing {len(batch)} file(s){names}")
-                rc = sync_batch(batch, repo_root, remote, rsync=rsync)
-
+        with PinnedHeader(header):
+            rc = sync_full(repo_root, remote, exclude_file, dry_run=False, rsync=rsync)
             if rc != 0:
-                print(f"[{timestamp}] ⚠️  rsync exited with code {rc}.")
-            elif rm_rc == 0:
-                print(f"[{timestamp}] ✅ Done.")
+                emit(f"! initial sync failed: rsync exited with code {rc}", "red")
+            else:
+                emit("in sync, watching for changes", "dim")
+
+            while True:
+                time.sleep(debounce)
+                with lock:
+                    batch = list(pending)
+                    pending.clear()
+                    removals = list(deleted)
+                    deleted.clear()
+
+                if not batch and not removals:
+                    continue
+
+                # Anything "deleted" that still exists was overwritten (atomic write) — sync it
+                overwritten = [f for f in removals if (repo_root / f).exists()]
+                removals = [f for f in removals if not (repo_root / f).exists()]
+                batch = list(set(batch) | set(overwritten))
+
+                # Drop batch entries that no longer exist (temp files from atomic writes)
+                batch = [f for f in batch if (repo_root / f).exists()]
+
+                rc = 0
+                if removals:
+                    if not PRETTY:
+                        emit(f"deleting {len(removals)} file(s): {', '.join(removals)}")
+                    delete_from_remote(removals, repo_root, remote, rsync)
+                if batch:
+                    if not PRETTY:
+                        emit(f"syncing {len(batch)} file(s): {', '.join(batch)}")
+                    rc = sync_batch(batch, repo_root, remote, rsync=rsync)
+                if rc != 0:
+                    emit(f"! rsync exited with code {rc}", "red")
     except KeyboardInterrupt:
-        observer.stop()
         print("\nStopped.")
     finally:
+        observer.stop()
         exclude_file.unlink(missing_ok=True)
     observer.join()
 
@@ -480,7 +523,7 @@ def main():
     # Never fall through to a sync on a mistyped option
     unknown = [a for a in args if a.startswith("-") and a not in KNOWN_FLAGS]
     if unknown:
-        print(f"❌ Unknown option: {' '.join(unknown)}")
+        print(f"error: unknown option: {' '.join(unknown)}")
         print("   Run `xsync --help` for usage.")
         sys.exit(2)
 
@@ -493,20 +536,20 @@ def main():
     interval_value = parse_flag_value(args, "--interval", None)
     positional = [a for a in args if not a.startswith("-") and a != interval_value]
     if len(positional) > 1:
-        print(f"❌ Expected at most one file, got: {' '.join(positional)}")
+        print(f"error: expected at most one file, got: {' '.join(positional)}")
         sys.exit(2)
     file_arg = positional[0] if positional else None
 
     result = find_config(Path.cwd())
     if result is None:
-        print("❌ No .xsync.toml found in current directory or any parent.")
+        print("error: no .xsync.toml found in current directory or any parent.")
         print("   Run `xsync --init` to create one here.")
         sys.exit(1)
 
     repo_root, config = result
     remote = config.get("remote")
     if not remote:
-        print("❌ 'remote' not set in .xsync.toml.")
+        print("error: 'remote' not set in .xsync.toml.")
         sys.exit(1)
 
     remote = normalize_remote(remote)
@@ -516,26 +559,26 @@ def main():
     try:
         version = subprocess.run([rsync, "--version"], capture_output=True, text=True).stdout
     except OSError:
-        print(f"❌ rsync not found: {rsync}")
+        print(f"error: rsync not found: {rsync}")
         sys.exit(1)
     global PRETTY
     if is_gnu_rsync3(version):
         PRETTY = "--verbose" not in args
     else:
-        print(f"⚠️  {rsync} is not GNU rsync 3.x; some flags may behave differently (brew install rsync).")
+        print(f"warning: {rsync} is not GNU rsync 3.x; some flags may behave differently (brew install rsync).")
     rsync = [rsync, *config.get("rsync_args", [])]
 
     # Full syncs (including the initial one in watch mode) run rsync --delete
     if watch or not file_arg:
         reason = unsafe_remote_reason(remote)
         if reason:
-            print(f"❌ Refusing to sync with --delete to '{remote}': {reason}.")
+            print(f"error: refusing to sync with --delete to '{remote}': {reason}.")
             print("   Point 'remote' in .xsync.toml at a dedicated project directory.")
             sys.exit(1)
 
     if is_ssh_remote(remote) and not ssh_reachable(remote, rsync):
         host = remote.split(":", 1)[0]
-        print(f"❌ Cannot reach '{host}' over SSH.")
+        print(f"error: cannot reach '{host}' over SSH.")
         print("   Host unreachable, key not loaded (ssh-add), or VPN not connected.")
         print(f"   Try: rsync --list-only {host}:.")
         sys.exit(1)
@@ -546,28 +589,25 @@ def main():
         cmd_watch(repo_root, remote, exclude_patterns, debounce, rsync)
         return
 
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    mode = "DRY RUN " if dry_run else ""
+    header = f"xsync  {repo_root.name} → {remote}" + ("  (dry run)" if dry_run else "")
 
     if file_arg:
         file_path = Path(file_arg)
         try:
             file_path.resolve().relative_to(repo_root)
         except ValueError:
-            print(f"❌ File is outside repo: {file_path}")
+            print(f"error: file is outside the project: {file_path}")
             sys.exit(1)
-        print(f"[{timestamp}] {mode}Syncing {file_arg} → {remote}")
+        print(paint(header, "bold"), flush=True)
         rc = sync_file(file_path, repo_root, remote, dry_run, rsync)
     else:
         exclude_file = write_exclude_file(repo_root, exclude_patterns)
-        print(f"[{timestamp}] {mode}Syncing {repo_root.name} → {remote}")
+        print(paint(header, "bold"), flush=True)
         rc = sync_full(repo_root, remote, exclude_file, dry_run, rsync)
         exclude_file.unlink(missing_ok=True)
 
-    if rc == 0:
-        print(f"[{timestamp}] ✅ Done.")
-    else:
-        print(f"[{timestamp}] ⚠️  rsync exited with code {rc}.")
+    if rc != 0:
+        print(paint(f"rsync exited with code {rc}", "red"))
         sys.exit(rc)
 
 

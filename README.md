@@ -351,13 +351,12 @@ An unknown option is an error; xsync never falls back to a sync on a typo.
 ### Reading the output
 
 ```
-[10:45:32] Syncing my_project → myhost:/data/projects/you/my_project/
+xsync  my_project → myhost:/data/projects/you/my_project/
   + src/new_module.py
   ~ README.md
   - old/unused.py
   ! rsync: [generator] failed to set times on "...": Operation not permitted (1)
-  1 new, 1 updated, 1 deleted (0.8s)
-[10:45:33] ✅ Done.
+1 new, 1 updated, 1 deleted · 0.8s
 ```
 
 | Mark | Meaning |
@@ -367,9 +366,18 @@ An unknown option is an error; xsync never falls back to a sync on a typo.
 | `-` | Deleted from the remote. |
 | `!` | A message or error from rsync or SSH, shown as received. |
 
-With `--dry-run` the same lines show what would happen, and the summary says "would be". Colors are used in a terminal and left out when the output is piped or `NO_COLOR` is set. This summary needs GNU rsync 3.x; with another rsync, or with `--verbose`, you get rsync's own output.
+The last line is a summary, or "Already up to date". If rsync fails, a final line gives its exit code. With `--dry-run` the header says "(dry run)" and the summary says "would be".
 
-`xsync` walks up from the current directory to find `.xsync.toml`, so you can run it from any subdirectory of the project.
+In `--watch` mode the header stays fixed at the top of the terminal and each change appears below it with the time:
+
+```
+xsync  my_project → myhost:/data/projects/you/my_project/  (watching, Ctrl+C to stop)
+15:10:08  in sync, watching for changes
+15:10:24  ~ src/model.py
+15:11:02  - notes/draft.md
+```
+
+Colors and the fixed header are used in a terminal and left out when the output is piped; `NO_COLOR` switches colors off. All of this needs GNU rsync 3.x; with another rsync, or with `--verbose`, you get rsync's own output.
 
 ## How it works
 
@@ -395,16 +403,16 @@ remote = "/Volumes/your-volume/your-project/"
 
 ## Troubleshooting
 
-**No `.xsync.toml` found**
+**"no .xsync.toml found"**
 Either `cd` into a project that has one, or run `xsync --init` to create one here.
 
-**Cannot reach host over SSH**
+**"cannot reach '<host>' over SSH"**
 The host is down, your key is not loaded (`ssh-add`), or the VPN is not connected. Check with `rsync --list-only <host>:.`.
 
-**Refusing to sync with --delete**
+**"refusing to sync with --delete"**
 The `remote` path is empty, `/`, or a home directory. Point it at a dedicated project directory.
 
-**File is outside repo**
+**"file is outside the project"**
 The file path passed to `xsync` is not inside the project root. `xsync` only syncs files within the project.
 
 **I need to see exactly what rsync did**
