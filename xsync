@@ -26,6 +26,7 @@ Keys inside a project:
     c  compare, changing nothing       p  problems: recorded warnings and errors
     f  sync one file or folder         e  edit .xsync.toml in your editor
     b  back to the overview            l  clear the list
+    ↑ ↓ PgUp PgDn Home End, or the mouse wheel: scroll back through the list
     v  verbose on/off                  h  help                  q  quit
 
 Watch mode keeps running for every project it is switched on for, whichever
@@ -363,7 +364,25 @@ class Panel:
 
 
 ESCAPE_KEYS = {"\033[A": "up", "\033[B": "down", "\033[C": "right", "\033[D": "left",
-               "\033OA": "up", "\033OB": "down", "\033OC": "right", "\033OD": "left", "\033": "esc"}
+               "\033OA": "up", "\033OB": "down", "\033OC": "right", "\033OD": "left",
+               "\033[5~": "pageup", "\033[6~": "pagedown", "\033[H": "home", "\033[F": "end",
+               "\033[1~": "home", "\033[4~": "end", "\033OH": "home", "\033OF": "end", "\033": "esc"}
+
+
+def parse_keys(chunk: str) -> list[str]:
+    """Split what the terminal sent into keys: characters, and names for arrows and paging keys.
+
+    Several keys can arrive at once (a paste, or a mouse wheel sending a burst
+    of arrows). Escape sequences that mean nothing here are dropped.
+    """
+    keys = []
+    for token in re.findall(r"\033\[[0-9;]*[A-Za-z~]|\033O[A-Za-z]|\033|.", chunk, re.DOTALL):
+        if token.startswith("\033"):
+            if token in ESCAPE_KEYS:
+                keys.append(ESCAPE_KEYS[token])
+        else:
+            keys.append(token)
+    return keys
 
 
 class Screen:
@@ -383,16 +402,13 @@ class Screen:
     def read_key(self, timeout: float) -> str | None:
         """Wait up to timeout seconds for a key press.
 
-        Returns the character, or up, down, left, right or esc.
+        Returns the character, or a name such as up, down, pageup, home or esc.
         """
         if not self._typed:
             ready, _, _ = select.select([sys.stdin], [], [], timeout)
             if not ready:
                 return None
-            chunk = os.read(sys.stdin.fileno(), 4096).decode("utf-8", "ignore")
-            if chunk.startswith("\033"):
-                return ESCAPE_KEYS.get(chunk)  # other escape sequences are ignored
-            self._typed.extend(chunk)
+            self._typed.extend(parse_keys(os.read(sys.stdin.fileno(), 4096).decode("utf-8", "ignore")))
         return self._typed.popleft() if self._typed else None
 
     def __enter__(self):
@@ -402,24 +418,29 @@ class Screen:
         return self
 
     def resume(self):
-        """Take the terminal: single key presses, no echo (Ctrl+C still works), hidden cursor."""
+        """Take the terminal: single key presses, no echo (Ctrl+C still works), hidden cursor.
+
+        Uses the alternate screen, so what was in the terminal comes back on
+        exit, and asks for the mouse wheel to arrive as arrow keys, which
+        scrolls a project's list without taking over mouse selection.
+        """
         import tty
         tty.setcbreak(sys.stdin.fileno())
-        self.write("\033[?25l")
+        self.write("\033[?1049h\033[?1007h\033[?25l")
 
     def suspend(self):
         """Hand the terminal to another program, such as an editor."""
         import termios
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._terminal_settings)
-        self.write("\033[r\033[?25h\033[2J\033[H")
+        self.write("\033[r\033[?25h\033[?1007l\033[?1049l")
 
     def __exit__(self, *exc):
         import termios
         if hasattr(signal, "SIGWINCH"):
             signal.signal(signal.SIGWINCH, signal.SIG_DFL)
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._terminal_settings)
-        # Reset the scroll region, show the cursor, clear the tab title
-        self.write("\0337\033[r\0338\033[?25h\033]0;\007")
+        # Reset the scroll region, show the cursor, leave the alternate screen, clear the tab title
+        self.write("\033[r\033[?25h\033[?1007l\033[?1049l\033]0;\007")
         return False
 
 
@@ -774,6 +795,7 @@ class Project:
         self.last_change = ""
         self.resting = ("idle, nothing checked yet", "busy")  # what the bar says when idle and not watching
         self.touched = False  # the user ran an action on it; only then is its host checked periodically
+        self.scroll = 0  # lines the list on screen is scrolled back from its end; 0 follows new lines
         self.last_flush = self.last_beat = time.monotonic()
         self.error = ""  # why this project cannot be synced, if it cannot
         self.config: dict = {}
@@ -1138,6 +1160,7 @@ class Project:
         for keys in PROJECT_KEYS:
             for key, _ in keys:
                 emit(f"{key}   {KEY_HELP[key]}", "dim")
+        emit("↑ ↓ PgUp PgDn Home End, or the mouse wheel: scroll back through this list", "dim")
 
     def tick(self, now: float):
         """Called a few times a second: send queued changes and check the host when due."""
@@ -1204,6 +1227,7 @@ class App:
         self.panel = Panel("", OVERVIEW_KEYS)
         self.notes: list[str] = []  # lines under the overview table, until the next key press
         self._drawn_rows = 0
+        self._list_height = 0  # rows of a project's list that fit on screen
         self.projects = [Project(root, self) for root in load_registry(registry)]
 
     # --- projects
@@ -1238,8 +1262,13 @@ class App:
     # --- drawing
 
     def show_line(self, project: Project, text: str):
-        """A project added a line to its list; print it if that list is on screen."""
-        if self.view is project:
+        """A project added a line to its list; print it if the end of that list is on screen."""
+        if self.view is not project:
+            return
+        if project.scroll:
+            project.scroll += 1  # keep showing the same lines while scrolled back
+            self.draw()
+        else:
             print(text, flush=True)
 
     def refresh(self, project: Project | None = None):
@@ -1310,20 +1339,38 @@ class App:
         project = self.view
         size = self.screen.size()
         rows = project.panel.header_rows(size.columns)
+        if project.scroll:  # say so where the problem line normally is
+            hint = f" ↑ scrolled back, {project.scroll} line(s) below   ↓ PgDn: forward   End: back to the newest"
+            rows[-2] = paint(hint[:max(size.columns - 1, 0)], "yellow")
         # The header grows when the buttons wrap; start over rather than draw over the list
         clear = clear or len(rows) != self._drawn_rows
         self._drawn_rows = len(rows)
         top = len(rows) + 1
+        self._list_height = max(size.lines - top, 0)  # the last row stays free for the next line
         # Setting the scroll region moves the cursor, so save and restore it
         start = "\033[2J" if clear else "\0337"
-        end = f"\033[{top};1H" if clear else "\0338"
+        end = "\0338"
         fixed = "".join(f"\033[{row};1H\033[2K{text}" for row, text in enumerate(rows, 1))
         title = f"\033]0;xsync {project.name}: {project.panel.state}\007"
-        out = f"{start}\033[{top};{size.lines}r{fixed}{end}{title}"
-        if clear:  # show the end of this project's list again
-            tail = list(project.log)[-max(size.lines - top, 0):] if size.lines > top else []
-            out += "".join(line + "\n" for line in tail)
-        self.screen.write(out)
+        shown = ""
+        if clear or project.scroll:
+            # Draw the part of the list that belongs on screen: its end, or further back when scrolled
+            last = max(len(project.log) - project.scroll, 0)
+            window = list(project.log)[max(last - self._list_height, 0):last]
+            shown = "".join(f"\033[{top + offset};1H\033[2K" for offset in range(self._list_height + 1))
+            shown += "".join(f"\033[{top + offset};1H{line}" for offset, line in enumerate(window))
+            if clear:  # new lines continue right below
+                end = f"\033[{top + len(window)};1H"
+        self.screen.write(f"{start}\033[{top};{size.lines}r{fixed}{shown}{end}{title}")
+
+    def scroll_list(self, lines: int):
+        """Scroll the list of the project on screen: positive goes back, negative forward."""
+        project = self.view
+        furthest = max(len(project.log) - self._list_height, 0)
+        position = max(0, min(project.scroll + lines, furthest))
+        if position != project.scroll:
+            project.scroll = position
+            self.draw(clear=position == 0)  # at the end again: follow new lines
 
     # --- input
 
@@ -1356,6 +1403,7 @@ class App:
         self.view = project
         self.selected = self.projects.index(project)
         self.notes = []
+        project.scroll = 0
         self.draw(clear=True)
 
     def back(self):
@@ -1452,6 +1500,14 @@ class App:
         if key in ("b", "esc", "left"):
             self.back()
             return
+        page = max(self._list_height - 1, 1)
+        scrolling = {"up": 1, "down": -1, "pageup": page, "pagedown": -page,
+                     "home": len(project.log), "end": -len(project.log)}
+        if key in scrolling:
+            self.scroll_list(scrolling[key])
+            return
+        if project.scroll and key in KEY_HELP:  # anything else happens at the end of the list
+            self.scroll_list(-len(project.log))
         self.activate(project)
         actions = {"s": project.full_sync, "c": project.compare, "i": project.show_status,
                    "r": lambda: project.check_connection(announce=True),
@@ -1464,6 +1520,7 @@ class App:
             self.edit_config(project)
         elif key == "l":
             project.log.clear()
+            project.scroll = 0
             self.draw(clear=True)
         elif key == "v":
             message = self.toggle_verbose()

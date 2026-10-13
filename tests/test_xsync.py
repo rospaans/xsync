@@ -998,6 +998,84 @@ def test_a_missing_editor_is_reported(hub, monkeypatch):
     assert hub.screen.written.count("<suspend>") == hub.screen.written.count("<resume>") == 1
 
 
+@pytest.mark.parametrize("chunk, expected", [
+    ("s", ["s"]),
+    ("\033[A", ["up"]),
+    ("\033[A\033[A\033[B", ["up", "up", "down"]),          # a mouse wheel sends a burst of arrows
+    ("\033OA\033[5~\033[6~\033[H\033[F", ["up", "pageup", "pagedown", "home", "end"]),
+    ("\033", ["esc"]),
+    ("\033[200~", []),                                      # sequences that mean nothing here are dropped
+    ("/some/path\n", list("/some/path") + ["\n"]),         # a paste
+    ("é", ["é"]),
+])
+def test_parse_keys(chunk, expected):
+    assert xsync.parse_keys(chunk) == expected
+
+
+def shown_lines(hub):
+    """The list lines in the last thing drawn."""
+    return re.findall(r"line \d+", visible(hub.screen.written[-1]))
+
+
+def test_scrolling_back_through_a_projects_list(hub, capsys):
+    project = hub.projects[0]
+    hub.activate(project)
+    for number in range(100):
+        xsync.emit(f"line {number}")
+    hub.open(project)
+    height = hub._list_height
+    assert 0 < height < 100
+    assert shown_lines(hub) == [f"line {n}" for n in range(100 - height, 100)]   # the end of the list
+
+    hub.on_project_key("up")
+    hub.on_project_key("up")
+    assert project.scroll == 2
+    assert shown_lines(hub) == [f"line {n}" for n in range(98 - height, 98)]
+    assert "scrolled back" in visible(hub.screen.written[-1])
+
+    hub.on_project_key("pageup")
+    assert project.scroll == 2 + height - 1
+    hub.on_project_key("home")
+    assert shown_lines(hub)[0] == "line 0" and project.scroll == 100 - height
+    hub.on_project_key("up")                                # already at the start
+    assert project.scroll == 100 - height
+
+    capsys.readouterr()
+    xsync.emit("line 100")                                  # a new line while scrolled back
+    assert capsys.readouterr().out == ""                    # is kept, not printed over what is being read
+    assert shown_lines(hub)[0] == "line 0" and project.log[-1].endswith("line 100")
+
+    hub.on_project_key("pagedown")
+    assert shown_lines(hub)[0] == f"line {height - 1}"
+    hub.on_project_key("end")
+    assert project.scroll == 0 and shown_lines(hub)[-1] == "line 100"
+    assert "scrolled back" not in visible(hub.screen.written[-1])
+    hub.on_project_key("down")                              # already at the end
+    assert project.scroll == 0
+    xsync.emit("line 101")
+    assert "line 101" in capsys.readouterr().out            # following new lines again
+
+
+def test_scroll_position_resets(hub):
+    project = hub.projects[0]
+    hub.activate(project)
+    for number in range(100):
+        xsync.emit(f"line {number}")
+    hub.open(project)
+    hub.on_project_key("pageup")
+    hub.on_project_key("h")                                 # an action jumps to the end to show its output
+    assert project.scroll == 0 and "this help" in project.log[-3] + project.log[-2] + project.log[-1]
+    hub.on_project_key("pageup")
+    hub.on_project_key("b")
+    hub.open(project)
+    assert project.scroll == 0
+    hub.on_project_key("pageup")
+    hub.on_project_key("l")
+    assert project.scroll == 0 and project.log == xsync.deque()
+    hub.on_project_key("up")                                # nothing to scroll in an empty list
+    assert project.scroll == 0
+
+
 def test_clearing_a_projects_list(hub):
     project = hub.projects[0]
     hub.open(project)

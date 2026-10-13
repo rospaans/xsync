@@ -430,6 +430,7 @@ The top of the screen stays fixed; changes scroll below it. On a narrow terminal
 | `p` | Problems: list the warnings and errors recorded so far, and clear the problem line. |
 | `e` | Edit this project's `.xsync.toml` in your editor; xsync reads it again when you close the editor. |
 | `l` | Clear this project's list. Nothing else changes. |
+| `↑` `↓` `PgUp` `PgDn` `Home` `End` | Scroll back through the list. The mouse wheel works too in most terminals. |
 | `v` | Verbose on or off: show rsync's raw output in place of the one-line-per-change list. |
 | `h` | Help: what each key does. |
 | `q` | Quit xsync, for all projects. Ctrl+C works too. |
@@ -451,6 +452,10 @@ The top of the screen stays fixed; changes scroll below it. On a narrow terminal
 | `!` | magenta | A failure reported by xsync, such as a lost connection or rsync's exit code. |
 
 After a compare the lines end in "(not synced)": they show what a sync would do.
+
+**Scrolling back.** xsync keeps the last 2000 lines of each project. `↑` and `PgUp` (or the mouse wheel) go back through them, `↓` and `PgDn` forward, `Home` to the oldest and `End` to the newest. While you are scrolled back, a yellow line under the buttons says so, and new changes are kept but do not move what you are reading. Any action key returns to the newest line first.
+
+xsync uses the terminal's alternate screen, like an editor does: when you quit, the terminal shows what was there before, and xsync's lists are gone.
 
 ### Watch mode
 
