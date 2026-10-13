@@ -6,6 +6,8 @@
 
 A small `rsync` wrapper for syncing a local project directory to a server over SSH. One command, one config file per project.
 
+![The xsync session in watch mode: a status bar, a grid of key buttons, and a list of synced changes](docs/session.svg)
+
 ## Recent changes
 
 xsync is now an interactive tool for SSH remotes. You run `xsync` in a terminal and do everything with single keys; the old command-line modes (`xsync file.py`, `--dry-run`, `--watch`, `--interval`) are gone.
