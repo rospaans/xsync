@@ -88,20 +88,14 @@ def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool) -
 def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool) -> int:
     """Sync a single file, preserving its relative path in the remote."""
     rel = file_path.resolve().relative_to(repo_root)
-    dest = remote.rstrip("/") + "/" + str(rel.parent) + "/"
-    cmd = [
-        "rsync",
-        "-avz",
-        str(file_path.resolve()),
-        dest,
-    ]
-    if dry_run:
-        cmd.insert(1, "--dry-run")
-    return subprocess.run(cmd).returncode
+    return sync_batch([str(rel)], repo_root, remote, dry_run)
 
 
-def sync_batch(batch: list[str], repo_root: Path, remote: str) -> int:
-    """Sync a batch of relative file paths using rsync --files-from."""
+def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False) -> int:
+    """Sync a batch of relative file paths using rsync --files-from.
+
+    --files-from implies --relative, so missing parent directories are created.
+    """
     files_from = repo_root / ".xsync.files"
     files_from.write_text("\n".join(batch) + "\n")
     cmd = [
@@ -111,9 +105,12 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str) -> int:
         str(repo_root) + "/",
         remote,
     ]
-    rc = subprocess.run(cmd).returncode
-    files_from.unlink(missing_ok=True)
-    return rc
+    if dry_run:
+        cmd.insert(1, "--dry-run")
+    try:
+        return subprocess.run(cmd).returncode
+    finally:
+        files_from.unlink(missing_ok=True)
 
 
 INTERNAL_FILES = {".xsync.files", ".xsync.exclude"}
