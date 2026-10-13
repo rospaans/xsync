@@ -14,6 +14,7 @@ Usage:
 """
 
 import sys
+import shlex
 import subprocess
 import tomllib
 import fnmatch
@@ -124,16 +125,29 @@ def is_ssh_remote(remote: str) -> bool:
     return ":" in remote
 
 
-def delete_from_remote(deleted_rels: list[str], remote: str):
+def build_remote_rm_command(remote_base: str, rels: list[str]) -> str:
+    """Build the shell command that deletes rels under remote_base on the remote host."""
+    base = remote_base.rstrip("/") if remote_base else "."
+    # A leading ~/ must stay unquoted so the remote shell still expands it
+    prefix = ""
+    if base == "~" or base.startswith("~/"):
+        prefix, base = "~/", base[2:]
+    targets = [rel if prefix and not base else f"{base}/{rel}" for rel in rels]
+    return "rm -f -- " + " ".join(prefix + shlex.quote(t) for t in targets)
+
+
+def delete_from_remote(deleted_rels: list[str], remote: str) -> int:
     """Delete specific files from remote without a full rsync scan."""
     if is_ssh_remote(remote):
         host, remote_base = remote.split(":", 1)
-        targets = [remote_base.rstrip("/") + "/" + r for r in deleted_rels]
-        subprocess.run(["ssh", host, "rm -f " + " ".join(f"'{t}'" for t in targets)])
-    else:
-        for rel in deleted_rels:
-            target = Path(remote.rstrip("/")) / rel
-            target.unlink(missing_ok=True)
+        rc = subprocess.run(["ssh", host, build_remote_rm_command(remote_base, deleted_rels)]).returncode
+        if rc != 0:
+            print(f"⚠️  Remote delete failed: ssh exited with code {rc}.")
+        return rc
+    for rel in deleted_rels:
+        target = Path(remote.rstrip("/")) / rel
+        target.unlink(missing_ok=True)
+    return 0
 
 
 def make_excluded_checker(repo_root: Path, patterns: list[str]):
@@ -258,17 +272,18 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
             batch = [f for f in batch if (repo_root / f).exists()]
 
             rc = 0
+            rm_rc = 0
             if removals:
                 print(f"[{timestamp}] Deleting {len(removals)} file(s): {', '.join(removals)}")
-                delete_from_remote(removals, remote)
+                rm_rc = delete_from_remote(removals, remote)
             if batch:
                 print(f"[{timestamp}] Syncing {len(batch)} file(s): {', '.join(batch)}")
                 rc = sync_batch(batch, repo_root, remote)
 
-            if rc == 0:
-                print(f"[{timestamp}] ✅ Done.")
-            else:
+            if rc != 0:
                 print(f"[{timestamp}] ⚠️  rsync exited with code {rc}.")
+            elif rm_rc == 0:
+                print(f"[{timestamp}] ✅ Done.")
     except KeyboardInterrupt:
         observer.stop()
         print("\nStopped.")
