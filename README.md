@@ -365,7 +365,7 @@ xsync --help               # show usage
 Running `xsync` in a terminal opens a session. It first compares the project with the server, like `git status`, and changes nothing until you press a key:
 
 ```
- XSYNC   my_project  →  myhost:/data/projects/you/my_project/              ● 3 differences at 15:52  ·  0 changes  ·  ssh
+ XSYNC   my_project  →   SSH  myhost:/data/projects/you/my_project/                   ● 3 differences at 15:52  ·  0 changes
 
   s  Sync    w  Watch off    c  Compare    f  Path    r  Reconnect    i  Info    e  Errors    q  Quit
 
@@ -389,7 +389,7 @@ The top of the screen stays fixed; changes scroll below it. Each key is drawn as
 | `e` | List the warnings and errors recorded so far, and clear the problem line. |
 | `q` | Quit. Ctrl+C works too. |
 
-- **The bar** shows the mode (`XSYNC` when idle, `WATCH`, or `OFFLINE`), what is synced where, and on the right the current state behind a dot: green when in sync, yellow when busy or when there are differences, magenta for problems.
+- **The bar** shows the mode (`XSYNC` when idle, `WATCH`, or `OFFLINE`), what is synced where with an `SSH` or `LOCAL` tag in front of the remote, and on the right the current state behind a dot: green when in sync, yellow when busy or when there are differences, magenta for problems.
 - **The line under the buttons** is empty when all is well. It shows the most recent warning or error until you press `e`, and the input prompt after `f`.
 - **The terminal tab title** shows the state too, so you can see it when the terminal is in the background.
 - **If the connection drops**, the session keeps running. It checks the server once a minute even when nothing changes; when offline, the bar says so, changes made in watch mode are queued, and xsync retries every 10 seconds.

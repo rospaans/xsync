@@ -187,6 +187,8 @@ def format_header(mode: str, name: str, remote: str, info: str = "", width: int 
 BAR_BACKGROUND = "48;5;236"
 BAR_BADGE = {"watch": "1;38;5;16;48;5;78", "idle": "1;38;5;16;48;5;75", "offline": "1;38;5;16;48;5;176"}
 BAR_LABEL = {"watch": "WATCH", "idle": "XSYNC", "offline": "OFFLINE"}
+# The transport tag (SSH or LOCAL) in front of the remote
+BAR_TRANSPORT = "1;38;5;255;48;5;61"
 BAR_DOT = {"ok": "38;5;78", "busy": "38;5;221", "problem": "38;5;176"}
 SESSION_KEYS = [("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("f", "Path"),
                 ("r", "Reconnect"), ("i", "Info"), ("e", "Errors"), ("q", "Quit")]
@@ -234,18 +236,19 @@ class Screen:
 
     def bar(self, width: int) -> str:
         """What is synced on the left, the current state on the right."""
-        left = [(f" {BAR_LABEL[self.mode]} ", BAR_BADGE[self.mode]), (f"  {self.name}", "1;97"),
-                (f"  →  {self.remote}", "38;5;250")]
+        left = [(f" {BAR_LABEL[self.mode]} ", BAR_BADGE[self.mode]), (f"  {self.name}", "1;97"), ("  →  ", "38;5;250"),
+                (f" {self.transport.upper()} ", BAR_TRANSPORT), (f" {self.remote}", "38;5;250")]
         right = [("●", BAR_DOT[self.level]), (f" {self.state}", "38;5;255")]
-        right += [(f"  ·  {part}", "38;5;245") for part in (self.detail, self.transport) if part]
+        if self.detail:
+            right.append((f"  ·  {self.detail}", "38;5;245"))
         right.append((" ", ""))
 
-        # Too narrow: drop details from the right, then shorten the remote, then the state
-        while segments_length(left) + 2 + segments_length(right) > width and len(right) > 3:
+        # Too narrow: drop the detail, then shorten the remote, then the state
+        if segments_length(left) + 2 + segments_length(right) > width and len(right) > 3:
             right.pop(-2)
-        room = width - segments_length(left[:2]) - 2 - segments_length(right)
-        if len(left[2][0]) > room:
-            left[2] = (left[2][0][:max(room - 1, 0)] + "…" if room > 0 else "", left[2][1])
+        room = width - segments_length(left[:4]) - 2 - segments_length(right)
+        if len(left[4][0]) > room:
+            left[4] = (left[4][0][:max(room - 1, 0)] + "…" if room > 0 else "", left[4][1])
         over = segments_length(left) + segments_length(right) - width
         if over > 0:
             right[1] = (right[1][0][:max(len(right[1][0]) - over, 0)], right[1][1])
