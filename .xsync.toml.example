@@ -22,4 +22,4 @@ exclude = [
 
 # --- Optional settings: remove the leading "# " from a line to use it ---
 # remote = "/Volumes/your-volume/your-project/"   # a local path instead of SSH (replaces the remote line above)
-# rsync_args = ["--no-perms", "--no-times"]       # extra flags passed to rsync; see the README for network shares
+# rsync_args = []                                  # extra rsync flags, e.g. for a network share: see "Remotes on a network share" in the README
