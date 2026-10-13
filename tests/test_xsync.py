@@ -530,7 +530,7 @@ def test_session_rows_never_exceed_terminal_width(width, colors, monkeypatch):
         assert len(bar) <= width
         assert bar.startswith(f" {label} "[:width])
     screen.message = "last problem 15:44:16: " + "x" * 300
-    for row in (*screen.key_rows(width), screen.message_row(width)):
+    for row in screen.header_rows(width):
         assert len(visible(row)) <= width
 
 
@@ -554,6 +554,27 @@ def test_buttons_cover_every_key_and_show_switch_states():
     screen.watching = screen.verbose = True
     rows = "\n".join(screen.key_rows(200))
     assert "Watch on" in rows and "Verbose on" in rows
+
+
+@pytest.mark.parametrize("colors", [False, True])
+def test_buttons_wrap_into_more_rows_on_a_narrow_terminal(colors, monkeypatch):
+    monkeypatch.setattr(xsync, "colors_on", lambda: colors)
+    screen = make_screen()
+    keys = [key for row in xsync.SESSION_KEYS for key, _ in row]
+
+    def layout(width):
+        return [visible(row) for row in screen.key_rows(width)]
+
+    assert len(layout(200)) == 2                      # five columns
+    assert len(layout(60)) == 4                       # three columns
+    assert len(layout(45)) == 5                       # two columns
+    assert len(layout(25)) == len(keys)               # one button per line
+    for width in (200, 60, 45, 25):
+        rows = layout(width)
+        text = "\n".join(rows)
+        assert all(len(row) <= width for row in rows)
+        assert "Reconnect" in text and "Verbose off" in text   # labels stay whole
+        assert len({len(row) for row in rows[:-1]}) == 1       # full rows line up
 
 
 def test_message_row_is_empty_without_a_message():

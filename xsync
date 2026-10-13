@@ -202,15 +202,24 @@ def segments_length(segments: list[tuple[str, str]]) -> int:
     return sum(len(text) for text, _ in segments)
 
 
+def clip_segments(segments: list[tuple[str, str]], width: int) -> list[tuple[str, str]]:
+    """Cut segments off at width characters, as a last resort on a tiny terminal."""
+    clipped = []
+    for text, code in segments:
+        room = width - segments_length(clipped)
+        if room <= 0:
+            break
+        clipped.append((text[:room], code))
+    return clipped
+
+
 class Screen:
     """The session display.
 
-    A status bar, two rows of buttons and a message line stay fixed at the top
+    A status banner, a grid of buttons and a message line stay fixed at the top
     of the terminal (using a scroll region) while changes scroll below, and
     single key presses are read without Enter.
     """
-
-    HEADER_ROWS = 6
 
     def __init__(self, name: str, remote: str, transport: str):
         self.name, self.remote, self.transport = name, remote, transport
@@ -219,6 +228,7 @@ class Screen:
         self.verbose = False
         self.message, self.message_color = "", "dim"
         self._typed: deque[str] = deque()
+        self._drawn_rows = 0
         self._terminal_settings = None
 
     # --- the fixed rows
@@ -252,21 +262,28 @@ class Screen:
         while len(left) > 1 and segments_length(left) + segments_length(right) > width:
             left.pop()
         gap = max(width - segments_length(left) - segments_length(right), 0)
-        return styled(left + [(" " * gap, "")] + right, BAR_BACKGROUND)
+        return styled(clip_segments(left + [(" " * gap, "")] + right, width), BAR_BACKGROUND)
 
     def key_rows(self, width: int) -> list[str]:
-        """The keys as a grid of buttons: equal-width cells, so the rows line up in columns."""
+        """The keys as a grid of equal-width buttons.
+
+        As many columns as fit with full labels; a narrower terminal gets fewer
+        columns and more rows, down to one button per line.
+        """
         plain = not colors_on()
         switched_on = {"w": self.watching, "v": self.verbose}
-        columns = max(len(keys) for keys in SESSION_KEYS)
+        keys = [item for row in SESSION_KEYS for item in row]
         cap_width = 4 if plain else 3   # "[s] " or " s "
-        longest = max(len(label) for keys in SESSION_KEYS for _, label in keys) + len(" off")
-        # Shrink the labels on a narrow terminal rather than dropping buttons
-        label_width = max(min(longest + 2, (width - 1) // columns - cap_width - BUTTON_GAP), 0)
+        longest = max(len(label) + (len(" off") if key in switched_on else 0) for key, label in keys)
+        label_width = longest + (0 if plain else 2)
+        cell_width = cap_width + label_width + BUTTON_GAP
+        columns = max(1, min(len(SESSION_KEYS[0]), (width - 1) // cell_width))
+        if cell_width > width - 1:  # narrower than one button: cut the label
+            label_width = max(width - 1 - cap_width - BUTTON_GAP, 0)
         rows = []
-        for keys in SESSION_KEYS:
+        for start in range(0, len(keys), columns):
             segments = [(" ", "")]
-            for key, label in keys:
+            for key, label in keys[start:start + columns]:
                 cap = BUTTON_CAP
                 if key in switched_on:
                     label += " on" if switched_on[key] else " off"
@@ -276,10 +293,21 @@ class Screen:
                 text = (label if plain else f" {label}")[:label_width].ljust(label_width)
                 cell = [(f"[{key}] " if plain else f" {key} ", cap), (text, BUTTON_LABEL), (" " * BUTTON_GAP, "")]
                 if segments_length(segments) + segments_length(cell) > width:
-                    break  # not even the key caps fit
+                    break  # not even the key cap fits
                 segments += cell
             rows.append(styled(segments))
         return rows
+
+    def header_rows(self, width: int) -> list[str]:
+        """Everything that stays fixed at the top, one string per terminal row."""
+        if colors_on():
+            # A three-row banner: the bar with a row of its background above and below
+            padding = styled([(" " * width, "")], BAR_BACKGROUND)
+            banner = [padding, self.bar(width), padding]
+        else:
+            banner = [self.bar(width)]
+        rule = paint("─" * max(width - 1, 0), "dim")
+        return [*banner, "", *self.key_rows(width), self.message_row(width), rule]
 
     def message_row(self, width: int) -> str:
         """The latest problem or the input prompt; empty when there is nothing to say."""
@@ -287,9 +315,11 @@ class Screen:
 
     def draw(self, clear: bool = False):
         size = shutil.get_terminal_size()
-        rows = [self.bar(size.columns), "", *self.key_rows(size.columns), self.message_row(size.columns),
-                paint("─" * (size.columns - 1), "dim")]
-        top = self.HEADER_ROWS + 1
+        rows = self.header_rows(size.columns)
+        # The header grows when the buttons wrap; start over rather than draw over the list
+        clear = clear or len(rows) != self._drawn_rows
+        self._drawn_rows = len(rows)
+        top = len(rows) + 1
         # Setting the scroll region moves the cursor, so save and restore it
         start = "\033[2J" if clear else "\0337"
         end = f"\033[{top};1H" if clear else "\0338"

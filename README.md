@@ -372,7 +372,7 @@ xsync --help               # show usage
 15:52:10  3 difference(s), nothing changed; press s to sync
 ```
 
-The top of the screen stays fixed; changes scroll below it.
+The top of the screen stays fixed; changes scroll below it. On a narrow terminal the buttons wrap into more rows, down to one per line, so their labels stay readable.
 
 | Key | Action |
 |---|---|
