@@ -11,7 +11,7 @@ remote = "myhost:/path/to/project/"
 
 # Extra rsync flags, e.g. when the remote directory is a network share that
 # rejects permission, ownership or timestamp changes
-# rsync_args = ["--no-perms", "--no-owner", "--no-group", "--omit-dir-times", "--inplace"]
+# rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-dir-times", "--inplace", "--checksum"]
 
 # Patterns to exclude from sync (rsync exclude-from syntax)
 exclude = [
