@@ -184,6 +184,7 @@ KEY_HELP = {
 # Buttons: a light key cap next to a darker label; the cap is colored to show state
 BUTTON_CAP, BUTTON_CAP_ON, BUTTON_CAP_ALERT = "1;38;5;16;48;5;252", "1;38;5;16;48;5;78", "1;38;5;16;48;5;176"
 BUTTON_LABEL = "38;5;255;48;5;238"
+BUTTON_GAP = 2
 
 
 def styled(segments: list[tuple[str, str]], background: str = "") -> str:
@@ -254,9 +255,14 @@ class Screen:
         return styled(left + [(" " * gap, "")] + right, BAR_BACKGROUND)
 
     def key_rows(self, width: int) -> list[str]:
-        """The keys as two rows of buttons."""
+        """The keys as a grid of buttons: equal-width cells, so the rows line up in columns."""
         plain = not colors_on()
         switched_on = {"w": self.watching, "v": self.verbose}
+        columns = max(len(keys) for keys in SESSION_KEYS)
+        cap_width = 4 if plain else 3   # "[s] " or " s "
+        longest = max(len(label) for keys in SESSION_KEYS for _, label in keys) + len(" off")
+        # Shrink the labels on a narrow terminal rather than dropping buttons
+        label_width = max(min(longest + 2, (width - 1) // columns - cap_width - BUTTON_GAP), 0)
         rows = []
         for keys in SESSION_KEYS:
             segments = [(" ", "")]
@@ -267,13 +273,11 @@ class Screen:
                     cap = BUTTON_CAP_ON if switched_on[key] else BUTTON_CAP
                 elif key == "r" and self.mode == "offline":
                     cap = BUTTON_CAP_ALERT
-                if plain:
-                    item = [(f"[{key}] {label}", ""), ("   ", "")]
-                else:
-                    item = [(f" {key} ", cap), (f" {label} ", BUTTON_LABEL), ("  ", "")]
-                if segments_length(segments) + segments_length(item) > width:
-                    break
-                segments += item
+                text = (label if plain else f" {label}")[:label_width].ljust(label_width)
+                cell = [(f"[{key}] " if plain else f" {key} ", cap), (text, BUTTON_LABEL), (" " * BUTTON_GAP, "")]
+                if segments_length(segments) + segments_length(cell) > width:
+                    break  # not even the key caps fit
+                segments += cell
             rows.append(styled(segments))
         return rows
 

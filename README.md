@@ -362,8 +362,8 @@ xsync --help               # show usage
 ```
  XSYNC   my_project  →   SSH  myhost:/data/projects/you/my_project/                   ● 3 differences at 15:52    0 changes
 
-  s  Sync    w  Watch off    c  Compare    f  Path    r  Reconnect
-  i  Info    e  Errors    v  Verbose off    h  Help    q  Quit
+  s  Sync           w  Watch off      c  Compare        f  Path           r  Reconnect
+  i  Info           e  Errors         v  Verbose off    h  Help           q  Quit
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 15:52:10  ~ src/model.py  (not synced)
