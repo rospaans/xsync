@@ -8,24 +8,25 @@ an alias from ~/.ssh/config (key auth, ideally with ControlMaster so repeated
 syncs reuse one connection). A local path (e.g. a mounted volume) also works.
 
 Usage:
-    xsync                      # in a project: open it; elsewhere: the overview of all projects.
-                               # Nothing is compared, synced or contacted until you press a key.
+    xsync                      # the overview of all projects. Nothing is compared, synced or
+                               # contacted until you press a key.
     xsync --verbose            # the same, showing rsync's raw output
     xsync --init               # create a starter .xsync.toml in current dir
     xsync --version            # show the version
     xsync --help               # show this help
 
 xsync remembers every project you run it in. The overview lists them all:
-    ↑ ↓  move the highlight          a  add a project by folder
-    o    open the highlighted one    x  remove it from the list
-    s w c  sync, watch on/off, compare the highlighted project
+    ↑ ↓  move the highlight          a  add a folder (creates its .xsync.toml if missing)
+    o    open the highlighted one    e  edit its .xsync.toml in your editor
+    s w c  sync, watch on/off, compare it     x  forget it (no files are touched)
 
 Keys inside a project:
     s  sync the whole project          r  check the connection, send what was queued
     w  watch mode on/off               i  info: the resolved setup
-    c  compare, changing nothing       e  list recorded warnings and errors
-    f  sync one file or folder         v  verbose on/off (rsync's raw output)
-    b  back to the overview            h  help                  q  quit
+    c  compare, changing nothing       p  problems: recorded warnings and errors
+    f  sync one file or folder         e  edit .xsync.toml in your editor
+    b  back to the overview            l  clear the list
+    v  verbose on/off                  h  help                  q  quit
 
 Watch mode keeps running for every project it is switched on for, whichever
 view is on screen.
@@ -50,6 +51,9 @@ import time
 from collections import deque
 from pathlib import Path
 from datetime import datetime
+
+# The remote in the starter config; a project still using it has not been set up
+PLACEHOLDER_REMOTE = "myhost:/path/to/project/"
 
 STARTER_CONFIG = """\
 # xsync configuration. The folder containing this file is what gets synced.
@@ -90,13 +94,11 @@ exclude = [
 """
 
 
-def find_config(start: Path) -> tuple[Path, dict] | None:
-    """Walk up from start, looking for .xsync.toml. Returns (repo_root, config)."""
+def find_root(start: Path) -> Path | None:
+    """Walk up from start, looking for the folder that holds .xsync.toml."""
     for directory in [start, *start.parents]:
-        config_path = directory / ".xsync.toml"
-        if config_path.exists():
-            with open(config_path, "rb") as f:
-                return directory, tomllib.load(f)
+        if (directory / ".xsync.toml").exists():
+            return directory
     return None
 
 
@@ -191,12 +193,13 @@ ROW_SELECTED = "48;5;238"
 # Buttons in a project's view: what you do, and what you look at
 PROJECT_KEYS = [
     [("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("f", "Path"), ("r", "Reconnect"), ("b", "Back")],
-    [("i", "Info"), ("e", "Errors"), ("v", "Verbose"), ("h", "Help"), ("q", "Quit")],
+    [("i", "Info"), ("p", "Problems"), ("e", "Edit"), ("l", "Clear"), ("v", "Verbose"), ("h", "Help")],
+    [("q", "Quit")],
 ]
 # Buttons in the overview; s, w and c act on the highlighted project
 OVERVIEW_KEYS = [
     [("o", "Open"), ("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("a", "Add")],
-    [("x", "Remove"), ("v", "Verbose"), ("h", "Help"), ("q", "Quit")],
+    [("e", "Edit"), ("x", "Forget"), ("v", "Verbose"), ("h", "Help"), ("q", "Quit")],
 ]
 KEY_HELP = {
     "s": "sync the whole project now",
@@ -206,7 +209,9 @@ KEY_HELP = {
     "r": "check the connection now and send what was queued",
     "b": "back to the overview of all projects (Esc and ← work too)",
     "i": "info: project, remote, host, rsync and flags in use",
-    "e": "list recorded warnings and errors, clear the problem line",
+    "p": "problems: list recorded warnings and errors, clear the problem line",
+    "e": "edit this project's .xsync.toml in your editor ($VISUAL, $EDITOR, or nano)",
+    "l": "clear this project's list (nothing else changes)",
     "v": "verbose on/off: show rsync's raw output",
     "h": "this help",
     "q": "quit (Ctrl+C works too)",
@@ -217,8 +222,9 @@ OVERVIEW_HELP = {
     "s": "sync the highlighted project now",
     "w": "watch mode on/off for the highlighted project; it keeps running while you look elsewhere",
     "c": "compare the highlighted project with the server; changes nothing",
-    "a": "add a project: type, paste or drag its folder, then Enter",
-    "x": "remove the highlighted project from this list (its files are not touched)",
+    "a": "add a project: type, paste or drag its folder, then Enter; a folder without a .xsync.toml gets one",
+    "e": "edit the highlighted project's .xsync.toml in your editor ($VISUAL, $EDITOR, or nano)",
+    "x": "forget the highlighted project: it leaves this list, and no file anywhere is touched",
     "v": "verbose on/off: show rsync's raw output",
     "h": "this help",
     "q": "quit (Ctrl+C works too)",
@@ -391,11 +397,21 @@ class Screen:
 
     def __enter__(self):
         import termios
-        import tty
         self._terminal_settings = termios.tcgetattr(sys.stdin.fileno())
-        tty.setcbreak(sys.stdin.fileno())  # single key presses, no echo; Ctrl+C still works
-        self.write("\033[?25l")  # hide the cursor
+        self.resume()
         return self
+
+    def resume(self):
+        """Take the terminal: single key presses, no echo (Ctrl+C still works), hidden cursor."""
+        import tty
+        tty.setcbreak(sys.stdin.fileno())
+        self.write("\033[?25l")
+
+    def suspend(self):
+        """Hand the terminal to another program, such as an editor."""
+        import termios
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._terminal_settings)
+        self.write("\033[r\033[?25h\033[2J\033[H")
 
     def __exit__(self, *exc):
         import termios
@@ -781,6 +797,19 @@ class Project:
         self.panel.detail = self.detail()
         self.sync_switches()
 
+    def reload(self):
+        """Read the config again after it was edited. Watch mode is switched off first."""
+        self.app.activate(self)
+        was_watching = self.watching
+        self.close()
+        self.offline = False
+        self.remote = ""
+        self.load()
+        emit("config reloaded" + ("; watch mode was switched off" if was_watching else ""), "dim")
+        if self.error:
+            warn(self.error, "magenta")
+        self.rest()
+
     def _load(self) -> str | None:
         if not self.root.is_dir():
             return "folder not found"
@@ -794,6 +823,8 @@ class Project:
         self.config = config
         if not config.get("remote"):
             return "'remote' is not set in .xsync.toml"
+        if config["remote"] == PLACEHOLDER_REMOTE:
+            return "set 'remote' in .xsync.toml first (press e to edit)"
         self.remote = normalize_remote(config["remote"])
         # Full syncs run rsync --delete
         reason = unsafe_remote_reason(self.remote)
@@ -826,7 +857,7 @@ class Project:
 
     def problem(self, text: str):
         self.problems.append((clock(), text))
-        self.panel.message = f"last problem {clock()}: {text}   [e] shows all"
+        self.panel.message = f"last problem {clock()}: {text}   [p] shows all"
         self.panel.message_color = "magenta"
         self.app.refresh(self)
 
@@ -1242,7 +1273,7 @@ class App:
     def table_rows(self, width: int) -> list[str]:
         """The overview: one row per project, the highlighted one marked."""
         if not self.projects:
-            return [paint("  No projects yet. Press a to add one, or run xsync inside a project folder.", "dim")]
+            return [paint("  No projects yet. Press a to add this folder or another one.", "dim")]
         name_width = min(max(len(project.name) for project in self.projects), 28)
         rows = []
         for index, project in enumerate(self.projects):
@@ -1296,11 +1327,10 @@ class App:
 
     # --- input
 
-    def ask(self, label: str) -> str | None:
-        """Read a line of text on the message row. Returns None if cancelled with Esc."""
+    def ask(self, label: str, text: str = "") -> str | None:
+        """Read a line of text on the message row, starting from `text`. Returns None if cancelled with Esc."""
         panel = self.view.panel if self.view else self.panel
         previous = (panel.message, panel.message_color)
-        text = ""
         while True:
             panel.message, panel.message_color = f"{label}: {text}▏   Enter to confirm, Esc to cancel", "bold"
             self.draw()
@@ -1340,15 +1370,42 @@ class App:
         return "verbose off" if self.pretty else "verbose on: showing rsync's raw output"
 
     def add_project(self):
-        text = self.ask("project folder to add (type, paste or drag it here)")
+        """Add a folder as a project; a folder without a config gets a starter one to edit."""
+        text = self.ask("project folder to add (type, paste or drag; Ctrl+U clears)", str(Path.cwd()))
         if not text:
             return
         folder = Path(clean_path(text))
-        found = find_config(folder.resolve()) if folder.is_dir() else None
-        if found is None:
-            self.notes = [f"No .xsync.toml in or above {folder}. Run `xsync --init` in the project folder first."]
+        if not folder.is_dir():
+            self.notes = [f"Not a folder: {folder}"]
             return
-        self.selected = self.projects.index(self.register(found[0]))
+        root = find_root(folder.resolve())
+        created = root is None
+        if created:
+            root = folder.resolve()
+            (root / ".xsync.toml").write_text(STARTER_CONFIG)
+        project = self.register(root)
+        self.selected = self.projects.index(project)
+        if created:
+            self.edit_config(project)
+            self.notes.insert(0, f"Created {root / '.xsync.toml'}.")
+        else:
+            self.notes = [f"Added {project.name}."]
+
+    def edit_config(self, project: Project):
+        """Open the project's .xsync.toml in the user's editor, then read it again."""
+        editor = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano")
+        self.screen.suspend()
+        try:
+            subprocess.run([*editor, str(project.root / ".xsync.toml")])
+            failed = ""
+        except OSError as error:
+            failed = f"Could not start the editor '{editor[0]}': {error}. Set $EDITOR to the one you use."
+        finally:
+            self.screen.resume()
+            self._drawn_rows = 0  # the editor used the whole screen; start over
+        project.reload()
+        self.notes = [failed or f"{project.name}: {project.error or 'config reloaded'}"]
+        self.draw(clear=True)
 
     def on_overview_key(self, key: str):
         self.notes = []
@@ -1367,7 +1424,10 @@ class App:
             pass
         elif key == "x":
             self.remove(project)
-            self.notes = [f"Removed {project.name} from the list. Its files were not touched."]
+            self.notes = [f"Forgot {project.name}: it is off this list, and no file was touched. Add it back with a."]
+        elif key == "e":
+            self.edit_config(project)
+            return
         elif key in ("o", "\r", "\n", "right"):
             self.open(project)
             return
@@ -1398,8 +1458,13 @@ class App:
                    "w": lambda: project.stop_watch() if project.watching else project.start_watch()}
         if key == "h":
             project.show_help()
-        elif key == "e":
+        elif key == "p":
             project.show_problems()
+        elif key == "e":
+            self.edit_config(project)
+        elif key == "l":
+            project.log.clear()
+            self.draw(clear=True)
         elif key == "v":
             message = self.toggle_verbose()
             if self.pretty and not project.gnu:
@@ -1418,18 +1483,15 @@ class App:
                 else:
                     actions[key]()
 
-    def run(self, start: Project | None = None):
-        """Show the overview, or go straight to `start`, then handle keys until quit."""
+    def run(self):
+        """Show the overview and handle keys until quit."""
         global OUTPUT
         try:
             with self.screen:
                 if hasattr(signal, "SIGWINCH"):
                     signal.signal(signal.SIGWINCH, lambda *_: self.draw(clear=True))
                 # Nothing runs until a key is pressed: no compare, no sync, no connection
-                if start is not None:
-                    self.open(start)
-                else:
-                    self.draw()
+                self.draw()
                 while True:
                     key = self.screen.read_key(0.2)
                     if key == "q":
@@ -1492,25 +1554,6 @@ def cmd_init():
     print("Edit the 'remote' line in it to point to your destination.")
 
 
-def offer_init():
-    """No project known and none here: offer to create a config on a key press, then exit."""
-    import termios
-    import tty
-    print("No .xsync.toml found in this folder or any parent, and no projects are known yet.")
-    print(f"Press i to create a starter config in {Path.cwd()}, or any other key to quit.")
-    fd = sys.stdin.fileno()
-    settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        key = os.read(fd, 1).decode("utf-8", "ignore")
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, settings)
-    if key != "i":
-        sys.exit(1)
-    cmd_init()
-    print("Then run `xsync` again.")
-
-
 KNOWN_FLAGS = {"--init", "--verbose", "--version", "--help", "-h"}
 
 
@@ -1541,13 +1584,11 @@ def main():
         sys.exit(1)
 
     app = App(registry_path(), verbose="--verbose" in args)
-    # Inside a project: remember it and go straight to it. Elsewhere: the overview.
-    here = find_config(Path.cwd())
-    start = app.register(here[0]) if here else None
-    if not app.projects:
-        offer_init()
-        return
-    app.run(start)
+    # Always the overview. Run inside a project, that project is remembered and highlighted.
+    here = find_root(Path.cwd())
+    if here is not None:
+        app.selected = app.projects.index(app.register(here))
+    app.run()
 
 if __name__ == "__main__":
     main()

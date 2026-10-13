@@ -285,32 +285,28 @@ Nothing is mounted. xsync copies one local folder to one folder on the server, a
 
 Each project has its own `.xsync.toml`, so each project syncs to its own folder on the server and nowhere else.
 
-**Step 1. Create the config.** In the root of your local project, generate a starter `.xsync.toml` (or copy `.xsync.toml.example` to `.xsync.toml`):
+**Step 1. Add the project.** Run `xsync` in the root of your local project and press `a`, then Enter to accept the folder:
 
 ```bash
 cd /path/to/my_project
-xsync --init
+xsync
 ```
 
-**Step 2. Set the destination.** Open the new `.xsync.toml` and edit the `remote` line: the SSH alias, a colon, then the folder on the server, ending in `/`.
+xsync creates a starter `.xsync.toml` there and opens it in your editor (`$VISUAL`, `$EDITOR`, or nano). `xsync --init` creates the same file without opening anything.
+
+**Step 2. Set the destination.** Edit the `remote` line: the SSH alias, a colon, then the folder on the server, ending in `/`.
 
 ```toml
 remote = "myhost:/data/projects/you/my_project/"
 ```
 
-Use a folder that belongs to this project alone. A full sync deletes anything in it that does not exist locally (except files matching `exclude`). The folder itself is created on the first sync if its parent exists.
+Use a folder that belongs to this project alone. A full sync deletes anything in it that does not exist locally (except files matching `exclude`). The folder itself is created on the first sync if its parent exists. Until `remote` is changed from the starter value, xsync refuses to sync the project.
 
 **Step 3. Adjust `exclude`.** Add folders that should stay only on one side, such as large data or results produced on the server.
 
 **Step 4. If the server folder is on a network share,** you may need an `rsync_args` line. See "Remotes on a network share".
 
-**Step 5. Compare, then sync.** Start xsync in the project:
-
-```bash
-xsync
-```
-
-This also adds the project to xsync's overview. Nothing happens until you press a key. Press `c` to compare: the list shows what would be copied (`+`, `~`) or deleted (`-`) on the server, and nothing has changed yet. Check the remote shown in the bar and the `-` lines in particular. If it looks right, press `s` to sync, or `w` to sync and keep watching.
+**Step 5. Compare, then sync.** Save and close the editor. Back in the overview, with the project highlighted, press `c` to compare, then `o` to open it and read the list: it shows what would be copied (`+`, `~`) or deleted (`-`) on the server, and nothing has changed yet. Check the remote shown in the bar and the `-` lines in particular. If it looks right, press `s` to sync, or `w` to sync and keep watching. To change the config later, press `e`.
 
 **Several projects** each get their own config and their own server folder:
 
@@ -353,24 +349,24 @@ rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-di
 ## Usage
 
 ```bash
-xsync                      # in a project: open it; elsewhere: the overview of all projects
+xsync                      # the overview of all projects
 xsync --verbose            # the same, showing rsync's raw output
 xsync --init               # create a starter .xsync.toml in current dir
 xsync --version            # show the version
 xsync --help               # show usage
 ```
 
-Anything else on the command line is an error, and xsync needs a terminal: it never syncs from a script or because of a typo. If there is no `.xsync.toml` here and no project is known yet, xsync offers to create one when you press `i`.
+`xsync` always opens the overview, and starting it does nothing by itself: it does not compare, sync or contact a server until you press a key. Anything else on the command line is an error, and xsync needs a terminal: it never syncs from a script or because of a typo.
 
 ### The overview
 
-xsync remembers each project the first time you run it there (it walks up from the current directory to find `.xsync.toml`, so any subfolder works). Run `xsync` outside a project, or press `b` inside one, to see them all:
+xsync remembers each project the first time you run it there (it walks up from the current directory to find `.xsync.toml`, so any subfolder works), and highlights it. Projects can also be added from the overview with `a`.
 
 ```
    X S Y N C     3 projects                                                         ● 2 watching    49 changes
 
   o  Open           s  Sync           w  Watch          c  Compare        a  Add
-  x  Remove         v  Verbose off    h  Help           q  Quit
+  e  Edit           x  Forget         v  Verbose off    h  Help           q  Quit
 
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
  › my_project        SSH  myhost:projects/my_project/           ● in sync, watching for changes    7 changes
@@ -387,27 +383,31 @@ Each row is a project: its name, where it syncs to, what it is doing, and how ma
 | `s` | Sync the highlighted project now. |
 | `w` | Switch watch mode on or off for the highlighted project. |
 | `c` | Compare the highlighted project with the server, changing nothing. |
-| `a` | Add a project: type, paste or drag its folder and press Enter. |
-| `x` | Remove the highlighted project from the list. Its files, local and remote, are not touched. |
+| `a` | Add a project. The prompt starts with the current folder; press Enter to accept it, or type, paste or drag another folder (Ctrl+U clears the line). A folder without a `.xsync.toml` gets a starter one, which opens in your editor so you can set `remote`. |
+| `e` | Edit the highlighted project's `.xsync.toml` in your editor. When you close the editor, xsync reads the file again. |
+| `x` | Forget the highlighted project: it leaves this list and stops being watched. No file is touched, locally or on the server, and `a` adds it back. |
 | `v` | Verbose on or off, for all projects. |
 | `h` | Help. |
 | `q` | Quit. Ctrl+C works too. |
 
 **Projects keep working in the background.** Watch mode stays on for every project you switched it on for, whichever view is on screen, and each project keeps its own list of changes, which you see again when you open it. One sync runs at a time, so a long sync in one project briefly delays the others.
 
-**A project that cannot be synced** (its folder is gone, the config is invalid, `remote` is unsafe) stays in the list with the reason in place of its state, until you fix it or remove it with `x`.
+**A project that cannot be synced** (its folder is gone, the config is invalid, `remote` is unsafe or still the starter placeholder) stays in the list with the reason in place of its state, until you fix it with `e` or forget it with `x`.
+
+**The editor** is `$VISUAL`, else `$EDITOR`, else `nano`. Editing a project's config switches its watch mode off; switch it on again afterwards.
 
 **Where the list is kept:** `~/.config/xsync/projects.toml` (or under `$XDG_CONFIG_HOME`). It only holds folder paths and is managed by xsync.
 
 ### A project
 
-Opening a project from the overview, or running `xsync` inside its folder, shows that project. Starting xsync does nothing by itself: it does not compare, sync or contact the server until you press a key. After `c` (compare, like `git status`) it looks like this:
+Press `o` on a project in the overview to open it. After `c` (compare, like `git status`) it looks like this:
 
 ```
  XSYNC   my_project  →   SSH  myhost:/data/projects/you/my_project/                   ● 3 differences at 15:52    0 changes
 
   s  Sync           w  Watch off      c  Compare        f  Path           r  Reconnect      b  Back
-  i  Info           e  Errors         v  Verbose off    h  Help           q  Quit
+  i  Info           p  Problems       e  Edit           l  Clear          v  Verbose off    h  Help
+  q  Quit
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 15:52:10  ~ src/model.py  (not synced)
@@ -427,7 +427,9 @@ The top of the screen stays fixed; changes scroll below it. On a narrow terminal
 | `r` | Check the connection now and, when it is back, send what was queued. |
 | `b` | Back to the overview of all projects (Esc and `←` work too). The project keeps watching if watch mode is on. |
 | `i` | Info: the version, project, config file, remote, whether the host answers, and the rsync and flags in use. |
-| `e` | List the warnings and errors recorded so far, and clear the problem line. |
+| `p` | Problems: list the warnings and errors recorded so far, and clear the problem line. |
+| `e` | Edit this project's `.xsync.toml` in your editor; xsync reads it again when you close the editor. |
+| `l` | Clear this project's list. Nothing else changes. |
 | `v` | Verbose on or off: show rsync's raw output in place of the one-line-per-change list. |
 | `h` | Help: what each key does. |
 | `q` | Quit xsync, for all projects. Ctrl+C works too. |
@@ -436,7 +438,7 @@ The top of the screen stays fixed; changes scroll below it. On a narrow terminal
 
 **The buttons** show state too: the key cap of `w` and `v` is green while that mode is on, and `r` turns magenta when the connection is lost.
 
-**The line under the buttons** is empty when all is well. It shows the most recent warning or error until you press `e`, and the input prompt after `f`.
+**The line under the buttons** is empty when all is well. It shows the most recent warning or error until you press `p`, and the input prompt after `f`.
 
 **The list** has one line per change, with the time:
 
@@ -499,8 +501,8 @@ remote = "/Volumes/your-volume/your-project/"
 
 ## Troubleshooting
 
-**"No .xsync.toml found"**
-Either `cd` into a project that has one, or press `i` (or run `xsync --init`) to create one here.
+**A project says "set 'remote' in .xsync.toml first"**
+Its config still has the starter value. Press `e`, set `remote`, save and close the editor.
 
 **"cannot reach '<host>' over SSH"**
 The host is down, your key is not loaded (`ssh-add`), or the VPN is not connected. Check with `rsync --list-only <host>:.`.
@@ -512,10 +514,10 @@ The `remote` path is empty, `/`, or a home directory. Point it at a dedicated pr
 The file or folder entered with `f` does not exist, or is not inside the project root. `xsync` only syncs paths within the project.
 
 **Something is off and I don't know where to start**
-Press `i` in the session. It shows the project, remote, rsync binary and flags in use, and whether the server answers.
+Open the project and press `i`. It shows the project, remote, rsync binary and flags in use, and whether the server answers.
 
 **I need to see exactly what rsync did**
-Press `v` in the session (or start with `xsync --verbose`) and repeat the action to get rsync's raw output.
+Press `v` (or start with `xsync --verbose`) and repeat the action to get rsync's raw output.
 
 **Exit code 23 from rsync**
 Some files or attributes could not be transferred. If the errors say "Operation not permitted", see "Remotes on a network share".

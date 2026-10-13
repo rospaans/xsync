@@ -598,7 +598,7 @@ def test_buttons_wrap_into_more_rows_on_a_narrow_terminal(colors, monkeypatch):
     def layout(width):
         return [visible(row) for row in panel.key_rows(width)]
 
-    assert len(layout(200)) == 2                       # all columns
+    assert len(layout(200)) == len(xsync.PROJECT_KEYS)  # all columns
     assert len(layout(60)) == -(-count // 3)           # three columns
     assert len(layout(45)) == -(-count // 2)           # two columns
     assert len(layout(25)) == count                    # one button per line
@@ -634,6 +634,12 @@ class FakeScreen:
 
     def read_key(self, timeout):
         return None
+
+    def suspend(self):
+        self.written.append("<suspend>")
+
+    def resume(self):
+        self.written.append("<resume>")
 
 
 def make_project_folder(root: Path, remote: str, extra: str = "") -> Path:
@@ -696,6 +702,7 @@ def test_projects_are_remembered_once_and_can_be_removed(hub, tmp_path):
 @pytest.mark.parametrize("config, expected", [
     (None, "no .xsync.toml"),
     ('exclude = []\n', "'remote' is not set"),
+    (xsync.STARTER_CONFIG, "set 'remote' in .xsync.toml first"),
     ('remote = "/"\n', "refusing to sync"),
     ('remote = "host:project/../../"\n', "refusing to sync"),
     ('remote = "host:project/"\ninterval = "soon"\n', "'interval'"),
@@ -837,7 +844,7 @@ def test_overview_rows_fit_and_mark_the_highlighted_project(hub, tmp_path, monke
 
 def test_overview_without_projects_says_what_to_do(tmp_path):
     app = xsync.App(tmp_path / "projects.toml", screen=FakeScreen())
-    assert "Press a to add one" in app.table_rows(120)[0]
+    assert "Press a to add" in app.table_rows(120)[0]
     app.on_overview_key("down")                           # nothing to move to; must not fail
     app.on_overview_key("o")
     assert app.view is None
@@ -893,18 +900,123 @@ def test_overview_summary_counts_states(hub, tmp_path):
     hub.projects[0].observer = None
 
 
-def test_adding_a_project_by_folder(hub, tmp_path, monkeypatch):
+def fake_editor(tmp_path: Path, monkeypatch, new_remote: str | None):
+    """Make $EDITOR a script that sets the remote line (or changes nothing) and records its argument."""
+    script = tmp_path / "fake-editor.sh"
+    change = f"sed -i.bak 's|^remote = .*|remote = \"{new_remote}\"|' \"$1\" && rm -f \"$1.bak\"" if new_remote else "true"
+    script.write_text(f'#!/bin/sh\necho "$1" >> "{tmp_path}/edited.log"\n{change}\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("EDITOR", str(script))
+    monkeypatch.delenv("VISUAL", raising=False)
+    return tmp_path / "edited.log"
+
+
+def test_adding_a_folder_that_already_has_a_config(hub, tmp_path, monkeypatch):
     beta = make_project_folder(tmp_path / "work" / "beta", "host:projects/beta/")
     (beta / "deep").mkdir()
-    answers = iter([str(beta / "deep").replace("/", "/", 1), str(tmp_path / "work"), None])
-    monkeypatch.setattr(hub, "ask", lambda label: next(answers))
+    edited = fake_editor(tmp_path, monkeypatch, None)
+    answers = iter([str(beta / "deep"), None, str(tmp_path / "no-such-folder")])
+    monkeypatch.setattr(hub, "ask", lambda label, text="": next(answers))
 
     hub.on_overview_key("a")                              # a folder inside the project finds its root
-    assert [project.root for project in hub.projects][-1] == beta and hub.selected == 1
-    hub.on_overview_key("a")                              # no config in or above this folder
-    assert len(hub.projects) == 2 and "No .xsync.toml" in hub.notes[0]
+    assert hub.projects[-1].root == beta and hub.selected == 1
+    assert not edited.exists()                            # an existing config is not opened for editing
     hub.on_overview_key("a")                              # cancelled
-    assert len(hub.projects) == 2
+    hub.on_overview_key("a")                              # not a folder
+    assert len(hub.projects) == 2 and "Not a folder" in hub.notes[0]
+
+
+def test_adding_a_folder_without_a_config_creates_one_and_opens_the_editor(hub, tmp_path, monkeypatch):
+    folder = (tmp_path / "work" / "fresh").resolve()
+    folder.mkdir(parents=True)
+    edited = fake_editor(tmp_path, monkeypatch, "host:projects/fresh/")
+    monkeypatch.setattr(hub, "ask", lambda label, text="": str(folder))
+
+    hub.on_overview_key("a")
+    project = hub.projects[-1]
+    assert project.root == folder and hub.selected == 1
+    assert edited.read_text().strip() == str(folder / ".xsync.toml")
+    assert project.remote == "host:projects/fresh/" and project.error == ""   # read again after editing
+    assert "Created" in hub.notes[0]
+    assert hub.screen.written.count("<suspend>") == hub.screen.written.count("<resume>") == 1
+    config = tomllib.loads((folder / ".xsync.toml").read_text())
+    assert ".git/" in config["exclude"]                   # the rest of the starter config is intact
+
+
+def test_a_new_config_left_unedited_is_not_usable(hub, tmp_path, monkeypatch):
+    folder = (tmp_path / "work" / "fresh").resolve()
+    folder.mkdir(parents=True)
+    fake_editor(tmp_path, monkeypatch, None)
+    monkeypatch.setattr(hub, "ask", lambda label, text="": str(folder))
+    hub.on_overview_key("a")
+    project = hub.projects[-1]
+    assert "set 'remote'" in project.error
+    hub.on_overview_key("s")                              # refuses instead of contacting "myhost"
+    assert "set 'remote'" in hub.notes[0] and project.log[-1].endswith(project.error)
+
+
+def test_add_prompt_starts_with_the_current_folder(hub, tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hub, "ask", lambda label, text="": seen.update(text=text))
+    hub.on_overview_key("a")
+    assert seen["text"] == str(Path.cwd())
+
+
+@pytest.mark.parametrize("from_view", ["overview", "project"])
+def test_editing_a_config_reloads_the_project(hub, tmp_path, monkeypatch, from_view):
+    project = hub.projects[0]
+    edited = fake_editor(tmp_path, monkeypatch, "host:somewhere/else/")
+    project.observer = None
+    if from_view == "project":
+        hub.open(project)
+        hub.on_project_key("e")
+        assert hub.view is project                        # still looking at the project afterwards
+    else:
+        hub.on_overview_key("e")
+    assert edited.read_text().strip() == str(project.root / ".xsync.toml")
+    assert project.remote == "host:somewhere/else/" and project.panel.remote == project.remote
+    assert project.panel.transport == "ssh"
+    assert any("config reloaded" in line for line in project.log)
+
+
+def test_editing_into_a_broken_config_shows_the_reason(hub, tmp_path, monkeypatch):
+    project = hub.projects[0]
+    fake_editor(tmp_path, monkeypatch, "/")
+    hub.on_overview_key("e")
+    assert "refusing to sync" in project.error and "refusing to sync" in hub.notes[0]
+    fake_editor(tmp_path, monkeypatch, str(tmp_path / "remote" / "alpha") + "/")
+    hub.on_overview_key("e")                              # and fixing it makes the project usable again
+    assert project.error == "" and project.panel.level != "problem"
+
+
+def test_a_missing_editor_is_reported(hub, monkeypatch):
+    monkeypatch.setenv("EDITOR", "/no/such/editor")
+    monkeypatch.delenv("VISUAL", raising=False)
+    hub.on_overview_key("e")
+    assert "Could not start the editor" in hub.notes[0]
+    assert hub.screen.written.count("<suspend>") == hub.screen.written.count("<resume>") == 1
+
+
+def test_clearing_a_projects_list(hub):
+    project = hub.projects[0]
+    hub.open(project)
+    hub.activate(project)
+    xsync.emit("an old line")
+    project.changes = 4
+    hub.on_project_key("l")
+    assert project.log == xsync.deque()
+    assert "an old line" not in hub.screen.written[-1] and "\033[2J" in hub.screen.written[-1]
+    assert project.changes == 4 and hub.view is project     # only the list is cleared
+
+
+def test_forgetting_a_project_touches_no_files(hub):
+    project = hub.projects[0]
+    before = tree(project.root.parent.parent)
+    hub.on_overview_key("x")
+    assert hub.projects == [] and xsync.load_registry(hub.registry) == []
+    assert "no file was touched" in hub.notes[0]
+    assert tree(project.root.parent.parent) == before
 
 
 @needs_gnu_rsync
