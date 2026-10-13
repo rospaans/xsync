@@ -3,6 +3,8 @@
 import os
 import re
 import shutil
+import tempfile
+import time
 
 import pytest
 
@@ -307,3 +309,29 @@ def test_ssh_sync_to_localhost(project, ssh_localhost):
     assert rsync_module.delete_from_remote(rels, src, remote, rsync) == 0
     assert tree(dst) == {"sub/b.txt"}
     assert not (dst / "deep").exists()  # emptied folders are removed too
+
+
+def test_run_rsync_does_not_wait_for_a_background_process_holding_the_pipe(capsys):
+    """ssh with ControlPersist leaves a process behind that keeps rsync's output pipe open."""
+    started = time.monotonic()
+    rc = rsync_module.run_rsync(["sh", "-c", "echo started; sleep 20 & exit 3"])
+    assert rc == 3
+    assert time.monotonic() - started < 5
+    assert "started" in capsys.readouterr().out
+
+
+@needs_rsync
+def test_temporary_files_stay_out_of_the_project(project, tmp_path, monkeypatch):
+    scratch = tmp_path / "system-temp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    before = project.local_files()
+    seen = []
+    real_run = rsync_module.run_rsync
+    monkeypatch.setattr(rsync_module, "run_rsync", lambda cmd, quiet=False: (seen.append(list(scratch.iterdir())), real_run(cmd, quiet))[1])
+
+    assert rsync_module.sync_batch(["a.txt", "sub/b.txt"], project.src, project.remote, rsync=RSYNC) == 0
+    assert len(seen[0]) == 1 and seen[0][0].name.startswith("xsync-")   # the list was in the temp folder
+    assert list(scratch.iterdir()) == []                                 # and is gone afterwards
+    assert project.local_files() == before                               # nothing was written to the project
+    assert tree(project.dst) == {"a.txt", "sub/b.txt"}

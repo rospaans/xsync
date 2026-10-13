@@ -37,7 +37,7 @@ from pathlib import Path
 
 from . import __version__
 from .app import App
-from .config import STARTER_CONFIG, find_root, registry_path
+from .config import STARTER_CONFIG, acquire_lock, find_root, registry_path
 
 
 def cmd_init():
@@ -78,6 +78,12 @@ def main():
 
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("error: xsync needs a terminal. Run `xsync` in a terminal and use the keys.")
+        sys.exit(1)
+
+    lock = acquire_lock(registry_path().parent / "lock")
+    if lock is None:
+        print("error: xsync is already running in another terminal.")
+        print("   One xsync handles all projects; two would sync the same projects over each other.")
         sys.exit(1)
 
     app = App(registry_path(), verbose="--verbose" in args)

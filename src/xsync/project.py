@@ -10,7 +10,7 @@ from collections import deque
 from pathlib import Path
 
 from . import __version__
-from .config import DEFAULT_INTERVAL, PLACEHOLDER_REMOTE, resolve_in_project, write_exclude_file
+from .config import DEFAULT_INTERVAL, PLACEHOLDER_REMOTE, resolve_in_project, write_temp_file
 from .excludes import make_excluded_checker
 from .output import clock, emit, state, warn
 from .remote import SSH_COMMAND, is_ssh_remote, normalize_remote, unsafe_remote_reason
@@ -228,7 +228,7 @@ class Project:
     @contextlib.contextmanager
     def excludes(self):
         """The exclude list as a file for rsync, removed again afterwards."""
-        path = write_exclude_file(self.root, self.exclude_patterns)
+        path = write_temp_file("exclude", self.exclude_patterns)
         try:
             yield path
         finally:

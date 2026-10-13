@@ -1,11 +1,12 @@
 """One project: loading its config, compare and sync, watch mode with the real file watcher."""
 
-from collections import deque
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from collections import deque
+from pathlib import Path
 
 import pytest
 
@@ -287,3 +288,20 @@ def test_status_rows(project):
     rows, ok = project_module.status_rows(project.src, config, "/", RSYNC, version)
     assert not ok
     assert dict(rows)["full sync"].startswith("refused")
+
+
+@needs_gnu_rsync
+def test_nothing_of_xsync_itself_reaches_the_remote(hub, tmp_path, monkeypatch):
+    """Even with a config that excludes nothing, a sync sends only the project's own files."""
+    scratch = tmp_path / "system-temp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    project = hub.projects[0]
+    (project.root / ".xsync.toml").write_text(f'remote = "{project.remote}"\n')
+    project.reload()
+    project.compare()
+    project.full_sync()
+    project.sync_one("sub")
+    assert tree(Path(project.remote)) == {".xsync.toml", "a.txt", "sub/b.txt"}
+    assert tree(project.root) == {".xsync.toml", "a.txt", "sub/b.txt"}
+    assert list(scratch.iterdir()) == []

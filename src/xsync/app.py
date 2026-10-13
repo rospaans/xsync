@@ -35,6 +35,7 @@ class App:
         self.notes: list[str] = []  # lines under the overview table, until the next key press
         self._drawn_rows = 0
         self._list_height = 0  # rows of a project's list that fit on screen
+        self._resized = False  # set by the resize signal; the redraw happens in the loop
         self.projects = [Project(root, self) for root in load_registry(registry)]
         self.sort()
 
@@ -88,6 +89,7 @@ class App:
 
     def while_waiting(self, project: Project, seconds: float) -> bool:
         """rsync is running for `project`: show for how long, allow scrolling, and cancel on Esc."""
+        self.after_resize()
         base = project.panel.state.split("  ·  ")[0]
         if seconds >= 3:
             project.panel.state = f"{base}  ·  {int(seconds)}s, Esc cancels"
@@ -99,6 +101,13 @@ class App:
             elif self.view is project and key in ("up", "down", "pageup", "pagedown", "home", "end"):
                 self.on_project_key(key)
         return cancel
+
+    def after_resize(self):
+        """Redraw if the terminal changed size. Called from the loops, never from the signal handler:
+        drawing there could land in the middle of another write and garble the screen."""
+        if self._resized:
+            self._resized = False
+            self.draw(clear=True)
 
     def refresh(self, project: Project | None = None):
         """Redraw the fixed rows if what changed is visible."""
@@ -211,6 +220,7 @@ class App:
             panel.message, panel.message_color = f"{label}: {text}▏   Enter to confirm, Esc to cancel", "bold"
             self.draw()
             key = self.screen.read_key(0.5)
+            self.after_resize()
             if key is None:
                 continue
             if key in ("\r", "\n"):
@@ -374,11 +384,12 @@ class App:
         try:
             with self.screen:
                 if hasattr(signal, "SIGWINCH"):
-                    signal.signal(signal.SIGWINCH, lambda *_: self.draw(clear=True))
+                    signal.signal(signal.SIGWINCH, lambda *_: setattr(self, "_resized", True))
                 # Nothing runs until a key is pressed: no compare, no sync, no connection
                 self.draw()
                 while True:
                     key = self.screen.read_key(0.2)
+                    self.after_resize()
                     if key == "q":
                         break
                     if key is not None:

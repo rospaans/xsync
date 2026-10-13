@@ -1,8 +1,8 @@
 """The hub: the overview, opening and leaving a project, adding, editing and forgetting projects."""
 
+import tomllib
 from collections import deque
 from pathlib import Path
-import tomllib
 
 import pytest
 
@@ -281,3 +281,18 @@ def test_actions_on_an_unusable_project_only_explain(hub, tmp_path):
     hub.open(hub.projects[1])
     hub.on_project_key("s")
     assert "folder not found" in hub.projects[1].log[-1]
+
+
+def test_a_resize_is_redrawn_from_the_loop_not_the_signal_handler(hub):
+    project = hub.projects[0]
+    hub.open(project)
+    drawn = len(hub.screen.written)
+    hub._resized = True                                     # all the signal handler does
+    assert len(hub.screen.written) == drawn                 # nothing is drawn at that moment
+    hub.after_resize()
+    assert len(hub.screen.written) == drawn + 1 and "\033[2J" in hub.screen.written[-1]
+    hub.after_resize()                                      # only once per resize
+    assert len(hub.screen.written) == drawn + 1
+    hub._resized = True
+    hub.while_waiting(project, 1.0)                         # also picked up while a sync is running
+    assert not hub._resized

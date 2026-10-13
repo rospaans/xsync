@@ -21,6 +21,7 @@ xsync is now an interactive tool for SSH remotes. You run `xsync` in a terminal 
 - **Stays inside the remote folder**: paths that are absolute or contain `..` are never synced or deleted, and a `remote` containing `..` is refused.
 - **`--delete` guard**: xsync refuses to start when the remote path is empty, `/`, `~`, `.` or a home directory. A missing trailing `/` on `remote` is added automatically.
 - **Keeps up with bursts**: after many changes at once, the touched folders are checked against the server, so nothing the file watcher missed is left behind.
+- **Leaves nothing behind**: the lists xsync hands to rsync are written to the system's temp folder, not into your project, so they are never synced or watched.
 - **Never looks frozen**: a running sync shows its elapsed time and can be cancelled with Esc.
 - **Survives connection drops**: the server is checked once a minute, changes made while offline are queued and retried, and a dead connection is noticed instead of hanging.
 - **Watch mode cleans up**: deleted files are removed from the remote, and so are folders once they are empty there.
@@ -366,6 +367,8 @@ xsync --version            # show the version
 xsync --help               # show usage
 ```
 
+Run one `xsync` at a time: it handles all your projects from one window, and a second one is turned away so that two never sync the same project over each other.
+
 `xsync` always opens the overview, and starting it does nothing by itself: it does not compare, sync or contact a server until you press a key. Anything else on the command line is an error, and xsync needs a terminal: it never syncs from a script or because of a typo.
 
 ### The overview
@@ -597,7 +600,7 @@ The code is in `src/xsync/`:
 | `ui.py` | Drawing the fixed rows of a view, and reading keys from the terminal. |
 | `output.py` | The small shared state, colors, and the lines that end up in a project's list. |
 
-The tests in `tests/` call these functions directly, against scratch folders, because xsync itself needs a terminal. A few of them run the real file watcher, including a burst of 3000 file changes; one optional test syncs over `ssh localhost` and is skipped where that is not available.
+Most tests in `tests/` call these functions directly, against scratch folders. A few run the real file watcher, including a burst of 3000 file changes. `tests/test_terminal.py` runs xsync as a whole in a pseudo-terminal, pressing keys and reading the screen. One optional test syncs over `ssh localhost` and is skipped where that is not available. Nothing in the suite contacts another machine.
 
 Two helper scripts:
 

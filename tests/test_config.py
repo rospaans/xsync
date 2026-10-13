@@ -1,7 +1,9 @@
 """Paths typed or dragged in by the user, and the list of known projects."""
 
-from pathlib import Path
+import os
+import tempfile
 import tomllib
+from pathlib import Path
 
 from xsync import config as config_module
 
@@ -45,3 +47,21 @@ def test_registry_lives_in_the_user_config_folder(monkeypatch, tmp_path):
     assert config_module.registry_path() == tmp_path / "xsync" / "projects.toml"
     monkeypatch.delenv("XDG_CONFIG_HOME")
     assert config_module.registry_path() == Path.home() / ".config" / "xsync" / "projects.toml"
+
+
+def test_only_one_xsync_can_hold_the_lock(tmp_path):
+    path = tmp_path / "config" / "xsync" / "lock"
+    first = config_module.acquire_lock(path)
+    assert first is not None and path.read_text().strip() == str(os.getpid())
+    assert config_module.acquire_lock(path) is None          # a second xsync is turned away
+    first.close()
+    second = config_module.acquire_lock(path)                # free again once the first has ended
+    assert second is not None
+    second.close()
+
+
+def test_temp_files_are_created_outside_any_project(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    path = config_module.write_temp_file("exclude", ["*.pyc", "data/"])
+    assert path.parent == tmp_path and path.name.startswith("xsync-") and path.suffix == ".exclude"
+    assert path.read_text() == "*.pyc\ndata/\n"

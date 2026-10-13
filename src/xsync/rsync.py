@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .config import write_temp_file
 from .output import emit, state, warn
 from .remote import is_ssh_remote
 
@@ -114,6 +115,10 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
     while True:
         ready, _, _ = select.select([proc.stdout], [], [], 0.25)
         if not ready:
+            # rsync is done once it has exited and nothing is left to read. Waiting for the pipe
+            # to close would hang when ssh leaves a background process holding it (ControlPersist).
+            if proc.poll() is not None:
+                break
             if not cancelled and state.output.waiting(time.monotonic() - started):
                 cancelled = True
                 proc.terminate()
@@ -126,6 +131,7 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
             handle(line.decode("utf-8", "replace"))
     if unfinished:
         handle(unfinished.decode("utf-8", "replace"))
+    proc.stdout.close()
     rc = proc.wait()
     state.last_counts.update(counts)
     if not dry_run:
@@ -185,8 +191,7 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     batch = inside_remote(batch)
     if not batch:
         return 0
-    files_from = repo_root / ".xsync.files"
-    files_from.write_text("\n".join(batch) + "\n")
+    files_from = write_temp_file("files", batch)
     cmd = [
         rsync[0],
         rsync_flags(remote),

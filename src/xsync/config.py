@@ -1,8 +1,10 @@
 """Files xsync reads and writes: a project's .xsync.toml, and the list of known projects."""
 
+import fcntl
 import json
 import os
 import shlex
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -33,8 +35,6 @@ exclude = [
     "outputs/",
     "logs/",
     ".xsync.toml",
-    ".xsync.exclude",
-    ".xsync.files",
 ]
 
 # --- Optional settings: remove the leading "# " from a line to use it ---
@@ -58,11 +58,36 @@ def find_root(start: Path) -> Path | None:
     return None
 
 
-def write_exclude_file(repo_root: Path, patterns: list[str]) -> Path:
-    """Write exclude patterns to a temp file rsync can consume."""
-    exclude_path = repo_root / ".xsync.exclude"
-    exclude_path.write_text("\n".join(patterns) + "\n")
-    return exclude_path
+def write_temp_file(kind: str, entries: list[str]) -> Path:
+    """Write a list for rsync (exclude patterns, or paths to send) to a temporary file.
+
+    The file goes in the system's temp folder, never in the project, so it is
+    not picked up by the file watcher or by a sync. The caller removes it.
+    """
+    handle, name = tempfile.mkstemp(prefix="xsync-", suffix=f".{kind}", text=True)
+    with os.fdopen(handle, "w") as f:
+        f.write("\n".join(entries) + "\n")
+    return Path(name)
+
+
+def acquire_lock(path: Path):
+    """Make sure only one xsync runs at a time; two would sync the same projects over each other.
+
+    Returns the open lock file (keep it for as long as xsync runs), or None
+    if another xsync already holds it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = open(path, "a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return None
+    lock.seek(0)
+    lock.truncate()
+    lock.write(f"{os.getpid()}\n")
+    lock.flush()
+    return lock
 
 
 def resolve_in_project(text: str, repo_root: Path) -> str | None:
@@ -91,6 +116,7 @@ def resolve_in_project(text: str, repo_root: Path) -> str | None:
     return None
 
 
+# Temp files that older versions of xsync wrote into the project folder; never synced or watched
 INTERNAL_FILES = {".xsync.files", ".xsync.exclude"}
 
 

@@ -23,7 +23,7 @@ def test_init_creates_a_valid_starter_config(tmp_path):
     config = tomllib.loads((tmp_path / ".xsync.toml").read_text())
     assert set(config) == {"remote", "exclude"}
     assert config["remote"] == "myhost:/path/to/project/"
-    assert ".xsync.files" in config["exclude"]
+    assert ".xsync.toml" in config["exclude"]
     assert run_xsync(tmp_path, "--init").returncode == 1  # never overwrites
 
 
