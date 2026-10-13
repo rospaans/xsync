@@ -16,7 +16,7 @@ SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now t
 - **`--delete` guard**: full syncs refuse to run when the remote path is empty, `/`, `~`, `.` or a home directory. A missing trailing `/` on `remote` is added automatically.
 - **Compression only over SSH**: `-z` is dropped for local and mounted paths.
 - **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) is reported within 5 seconds, before any sync and before `--watch` starts.
-- **rsync flavor**: new optional `rsync = "/path/to/rsync"` key. Defaults to `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`. A one-line warning is printed if it is not GNU rsync 3.x (recent macOS ships openrsync).
+- **rsync flavor**: xsync uses `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`, and prints a one-line warning if it is not GNU rsync 3.x (recent macOS ships openrsync). An optional `rsync = "/path/to/rsync"` key overrides the choice (see Troubleshooting).
 - **Extra rsync flags**: new optional `rsync_args = [...]` key, for example for server folders on storage that rejects permission, ownership or timestamp changes (see "Remotes on a network share").
 - **Tests**: `python -m pytest tests`.
 
@@ -238,7 +238,6 @@ exclude = [
 
 # --- Optional settings: remove the leading "# " from a line to use it ---
 # remote = "/Volumes/your-volume/your-project/"   # a local path instead of SSH (replaces the remote line above)
-# rsync = "/opt/homebrew/bin/rsync"               # use a specific rsync binary
 # rsync_args = ["--no-perms", "--no-times"]       # extra flags passed to rsync; see the README for network shares
 ```
 
@@ -246,7 +245,6 @@ exclude = [
 |---|---|---|
 | `remote` | yes | Where to sync to. |
 | `exclude` | no | Files and folders to skip. |
-| `rsync` | no | Path to the rsync binary. Default: `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`. |
 | `rsync_args` | no | A list of extra flags passed to rsync, placed after xsync's own so they can override them. |
 
 The `remote` field is an SSH target in the form `host:/path/`, where `host` is an alias from `~/.ssh/config`. `user@host:/path/` also works.
@@ -394,6 +392,22 @@ Check that `remote` is relative to the boundary folder (`myhost-sync:research/pr
 
 **rsync warning about "not GNU rsync 3.x"**
 macOS ships a different rsync. Run `brew install rsync`; xsync picks up `/opt/homebrew/bin/rsync` automatically.
+
+**xsync uses the wrong rsync**
+xsync runs `/opt/homebrew/bin/rsync` if it exists, and otherwise the first `rsync` on your `PATH`. If your GNU rsync is installed somewhere else (for example `/usr/local/bin/rsync` on an Intel Mac), the warning above keeps appearing or flags are rejected. Check what you have:
+
+```bash
+which -a rsync                  # every rsync on your PATH
+/path/to/rsync --version        # GNU rsync prints "rsync  version 3.x"
+```
+
+Then point xsync at the right one by adding this line to the project's `.xsync.toml`:
+
+```toml
+rsync = "/usr/local/bin/rsync"
+```
+
+This setting is not in the starter config because the automatic choice is right in most setups.
 
 ## License
 
