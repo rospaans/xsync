@@ -166,12 +166,16 @@ def test_adding_a_folder_without_a_config_creates_one_and_opens_the_editor(hub, 
     assert ".git/" in config["exclude"]                   # the rest of the starter config is intact
 
 
-def test_add_prompt_starts_with_the_current_folder(hub, tmp_path, monkeypatch):
-    seen = {}
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(hub, "ask", lambda label, text="": seen.update(text=text))
+def test_add_prompt_starts_empty_and_a_dot_means_the_current_folder(hub, tmp_path, monkeypatch):
+    seen = []
+    fresh = (tmp_path / "work" / "here").resolve()
+    fresh.mkdir(parents=True)
+    fake_editor(tmp_path, monkeypatch, "host:projects/here/")
+    monkeypatch.chdir(fresh)
+    monkeypatch.setattr(hub, "ask", lambda label, text="": seen.append(text) or ".")
     hub.on_overview_key("a")
-    assert seen["text"] == str(Path.cwd())
+    assert seen == [""]                                    # nothing is filled in beforehand
+    assert hub.projects[hub.selected].root == fresh
 
 
 def test_a_missing_editor_is_reported(hub, monkeypatch):

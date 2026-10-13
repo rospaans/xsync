@@ -258,7 +258,7 @@ class App:
 
     def add_project(self):
         """Add a folder as a project; a folder without a config gets a starter one to edit."""
-        text = self.ask("project folder to add (type, paste or drag; Ctrl+U clears)", str(Path.cwd()))
+        text = self.ask("project folder to add (type, paste or drag it here; . is the current folder)")
         if not text:
             return
         folder = Path(clean_path(text))

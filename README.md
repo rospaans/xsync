@@ -296,7 +296,7 @@ Nothing is mounted. xsync copies one local folder to one folder on the server, a
 
 Each project has its own `.xsync.toml`, so each project syncs to its own folder on the server and nowhere else.
 
-**Step 1. Add the project.** Run `xsync` in the root of your local project and press `a`, then Enter to accept the folder:
+**Step 1. Add the project.** Run `xsync` in the root of your local project and press `a`, type `.` for the current folder, and press Enter:
 
 ```bash
 cd /path/to/my_project
@@ -396,7 +396,7 @@ Each row is a project: its name, where it syncs to, what it is doing, and how ma
 | `s` | Sync the highlighted project now. |
 | `w` | Switch watch mode on or off for the highlighted project. |
 | `c` | Compare the highlighted project with the server, changing nothing. |
-| `a` | Add a project. The prompt starts with the current folder; press Enter to accept it, or type, paste or drag another folder (Ctrl+U clears the line). A folder without a `.xsync.toml` gets a starter one, which opens in your editor so you can set `remote`. |
+| `a` | Add a project: type, paste or drag its folder and press Enter (`.` is the folder you started xsync in; Esc cancels). A folder without a `.xsync.toml` gets a starter one, which opens in your editor so you can set `remote`. |
 | `e` | Edit the highlighted project's `.xsync.toml` in your editor. When you close the editor, xsync reads the file again. |
 | `x` | Forget the highlighted project: it leaves this list and stops being watched. No file is touched, locally or on the server, and `a` adds it back. |
 | `v` | Verbose on or off, for all projects. |

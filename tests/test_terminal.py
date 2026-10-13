@@ -226,7 +226,7 @@ def test_adding_a_folder_creates_a_config_and_opens_the_editor(world):
     terminal.expect("No projects yet")
     terminal.press("a")
     terminal.expect("project folder to add")
-    terminal.press("\x15" + str(fresh) + "\n")                # Ctrl+U clears the prefilled folder
+    terminal.press(str(fresh) + "\n")                         # the prompt starts empty
     terminal.expect("1 project", "gamma", "Created")
     assert f'remote = "{gamma_remote}/"' in (fresh / ".xsync.toml").read_text()
 
