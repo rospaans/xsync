@@ -37,7 +37,7 @@ if [[ -z "$PYTHON" ]]; then
 fi
 
 if [[ -z "$PYTHON" ]]; then
-    echo "❌ Python 3.11+ not found. Install it (e.g. brew install python@3.13) and try again."
+    echo "error: Python 3.11+ not found. Install it (e.g. brew install python@3.13) and try again."
     exit 1
 fi
 
@@ -55,16 +55,16 @@ VENV_PYTHON="$VENV_DIR/bin/python3"
 
 # Install watchdog into the venv
 if "$VENV_PYTHON" -c "import watchdog" 2>/dev/null; then
-    echo "✅ watchdog already installed."
+    echo "watchdog already installed."
 else
     echo "Installing watchdog..."
     "$VENV_PYTHON" -m pip install --quiet watchdog
-    echo "✅ watchdog installed."
+    echo "watchdog installed."
 fi
 
 # Bake the venv's Python path into the shebang
 sed "1s|.*|#!${VENV_PYTHON}|" "$(dirname "$0")/$SCRIPT_NAME" > "$INSTALL_DIR/$SCRIPT_NAME"
 chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 
-echo "✅ Installed xsync to $INSTALL_DIR/$SCRIPT_NAME"
+echo "Installed xsync to $INSTALL_DIR/$SCRIPT_NAME"
 echo "   Run 'xsync --init' to set up a project, or 'xsync --watch' to start watching."

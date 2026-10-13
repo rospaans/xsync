@@ -15,9 +15,13 @@ Usage:
     xsync file.py --dry-run    # dry-run single-file mode
     xsync --watch              # watch for changes and sync automatically
     xsync --watch --interval 5 # watch with a 5-second debounce window
+    xsync --status             # show the resolved setup and check the host; no sync
     xsync --verbose            # show rsync's raw output instead of the summary
+    xsync --version            # show the version
     xsync --help               # show this help
 """
+
+__version__ = "0.2.0"
 
 import os
 import re
@@ -106,13 +110,23 @@ def is_gnu_rsync3(version_output: str) -> bool:
 PRETTY = False
 # Set by cmd_watch(): prefix each output line with the time
 STAMP = False
+# Number of new, updated and deleted paths reported so far
+CHANGES = 0
 
-COLORS = {"green": "32", "yellow": "33", "red": "31", "dim": "2", "bold": "1"}
+COLORS = {
+    "green": "32", "blue": "34", "red": "31", "yellow": "33", "magenta": "35", "dim": "2", "bold": "1",
+    # header badges, one per mode
+    "sync": "1;7;34", "dry-run": "1;7;33", "file": "1;7;36", "watch": "1;7;32", "offline": "1;7;35", "status": "1;7",
+}
+
+
+def colors_on() -> bool:
+    return sys.stdout.isatty() and "NO_COLOR" not in os.environ
 
 
 def paint(text: str, color: str | None) -> str:
     """Color text for a terminal; plain when piped or when NO_COLOR is set."""
-    if color is None or not sys.stdout.isatty() or "NO_COLOR" in os.environ:
+    if color is None or not colors_on():
         return text
     return f"\033[{COLORS[color]}m{text}\033[0m"
 
@@ -123,29 +137,66 @@ def emit(text: str, color: str | None = None):
     print(prefix + paint(text, color), flush=True)
 
 
+def format_header(mode: str, name: str, remote: str, info: str = "", width: int | None = None) -> str:
+    """The header line: the mode, what is synced where, and optional details.
+
+    With a width, the line is shortened to fit: the middle part first, then
+    the details are dropped.
+    """
+    lead = f" {mode.upper()} " if colors_on() else f"xsync {mode}"
+    middle = f"{name} → {remote}"
+    if width is not None:
+        def length() -> int:
+            return len(lead) + 2 + len(middle) + (2 + len(info) if info else 0)
+        if length() > width:
+            keep = max(len(middle) - (length() - width), 30)
+            if keep < len(middle):
+                middle = middle[:keep - 1] + "…"
+        if length() > width:
+            info = ""
+        if length() > width:
+            middle = middle[:max(width - len(lead) - 3, 0)] + "…"
+    line = paint(lead, mode) + "  " + paint(middle, "bold")
+    return line + ("  " + paint(info, "dim") if info else "")
+
+
 class PinnedHeader:
-    """Keep one line fixed at the top of the terminal while output scrolls below it.
+    """The watch-mode header, fixed at the top of the terminal while output scrolls below it.
 
     Uses a terminal scroll region. When output is not a terminal, or with raw
     rsync output, the header is simply printed once.
     """
 
-    def __init__(self, text: str):
-        self.text = text
+    def __init__(self, name: str, remote: str, transport: str):
+        self.name, self.remote, self.transport = name, remote, transport
+        self.mode, self.status = "watch", ""
         self.pinned = PRETTY and sys.stdout.isatty()
+
+    def line(self, width: int | None = None) -> str:
+        info = " · ".join(part for part in (self.transport, self.status, "Ctrl+C to stop") if part)
+        return format_header(self.mode, self.name, self.remote, info, width)
 
     def draw(self, clear: bool = False):
         size = shutil.get_terminal_size()
-        line = paint(self.text[:size.columns - 1], "bold")
+        rule = paint("─" * (size.columns - 1), "dim")
         # Setting the scroll region moves the cursor, so save and restore it
         start = "\033[2J" if clear else "\0337"
-        end = "\033[2;1H" if clear else "\0338"
-        sys.stdout.write(f"{start}\033[2;{size.lines}r\033[1;1H\033[2K{line}{end}")
+        end = "\033[3;1H" if clear else "\0338"
+        sys.stdout.write(
+            f"{start}\033[3;{size.lines}r"
+            f"\033[1;1H\033[2K{self.line(size.columns - 1)}"
+            f"\033[2;1H\033[2K{rule}{end}"
+        )
         sys.stdout.flush()
+
+    def set_status(self, status: str, mode: str = "watch"):
+        self.status, self.mode = status, mode
+        if self.pinned:
+            self.draw()
 
     def __enter__(self):
         if not self.pinned:
-            print(paint(self.text, "bold"), flush=True)
+            print(self.line(), flush=True)
             return self
         self.draw(clear=True)
         if hasattr(signal, "SIGWINCH"):
@@ -188,14 +239,25 @@ def parse_change(line: str) -> tuple[str, str]:
 # copies of locally deleted files, that is the expected state, not a problem.
 VANISHED_MESSAGES = ("file has vanished:", "WARNING: parent dir is absent", "rsync warning: some files vanished")
 VANISHED_EXIT_CODE = 24
+# rsync exit codes that mean the connection failed, so a retry can help:
+# socket I/O, protocol stream, timeouts, and ssh's own failure code
+CONNECTION_EXIT_CODES = {10, 12, 30, 35, 255}
 
-CHANGE_MARKS = {"new": ("+", "green"), "updated": ("~", "yellow"), "deleted": ("-", "red")}
+# No prompts, and notice a dead connection within about a minute instead of hanging
+SSH_COMMAND = "ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+
+CHANGE_MARKS = {"new": ("+", "green"), "updated": ("~", "blue"), "deleted": ("-", "red")}
 
 
-def run_rsync(cmd: list[str]) -> int:
-    """Run rsync. With PRETTY, print one short line per change instead of rsync's output."""
+def run_rsync(cmd: list[str], quiet: bool = False) -> int:
+    """Run rsync. With PRETTY, print one short line per change instead of rsync's output.
+
+    quiet hides rsync's messages and errors (changes are still shown).
+    """
+    global CHANGES
     if not PRETTY:
-        return subprocess.run(cmd).returncode
+        silence = subprocess.DEVNULL if quiet else None
+        return subprocess.run(cmd, stdout=silence, stderr=silence).returncode
     cmd = [cmd[0], "--out-format=%i %n%L", "--outbuf=L", *cmd[1:]]
     counts = {"new": 0, "updated": 0, "deleted": 0}
     seen_messages = set()
@@ -208,12 +270,13 @@ def run_rsync(cmd: list[str]) -> int:
             counts[kind] += 1
             mark, color = CHANGE_MARKS[kind]
             emit(f"{mark} {text}", color)
-        elif kind == "message" and text not in seen_messages:
+        elif kind == "message" and not quiet and text not in seen_messages:
             if deleting_missing and text.startswith(VANISHED_MESSAGES):
                 continue
             seen_messages.add(text)
             emit(f"! {text}", "yellow")
     rc = proc.wait()
+    CHANGES += sum(counts.values())
     if not STAMP:
         would = "would be " if "--dry-run" in cmd else ""
         changes = ", ".join(f"{n} {would}{kind}" for kind, n in counts.items() if n)
@@ -255,7 +318,7 @@ def inside_remote(rels: list[str]) -> list[str]:
 
 
 def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False,
-               rsync: list[str] = RSYNC, delete_missing: bool = False) -> int:
+               rsync: list[str] = RSYNC, delete_missing: bool = False, quiet: bool = False) -> int:
     """Sync a batch of relative file paths using rsync --files-from.
 
     --files-from implies --relative, so missing parent directories are created.
@@ -280,7 +343,7 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     if delete_missing:
         cmd.insert(1, "--delete-missing-args")
     try:
-        rc = run_rsync(cmd)
+        rc = run_rsync(cmd, quiet)
     finally:
         files_from.unlink(missing_ok=True)
     return 0 if delete_missing and rc == VANISHED_EXIT_CODE else rc
@@ -329,20 +392,43 @@ def unsafe_remote_reason(remote: str) -> str | None:
     return None
 
 
-def delete_from_remote(deleted_rels: list[str], repo_root: Path, remote: str, rsync: list[str] = RSYNC) -> int:
+def missing_parent_dirs(rels: list[str], repo_root: Path) -> list[list[str]]:
+    """Folders above the given paths that no longer exist locally, grouped deepest first."""
+    by_depth: dict[int, set[str]] = {}
+    for rel in rels:
+        for parent in Path(rel).parents:
+            if parent.parts and not (repo_root / parent).exists():
+                by_depth.setdefault(len(parent.parts), set()).add(str(parent))
+    return [sorted(by_depth[depth]) for depth in sorted(by_depth, reverse=True)]
+
+
+def delete_from_remote(deleted_rels: list[str], repo_root: Path, remote: str,
+                       rsync: list[str] = RSYNC, quiet: bool = False) -> int:
     """Delete specific files from remote without a full rsync scan.
 
-    Over SSH this goes through rsync (--delete-missing-args, GNU rsync 3.1+),
-    so no shell command ever runs on the remote host.
+    Folders that disappeared locally are removed too, but only once they are
+    empty on the remote. Over SSH this goes through rsync (--delete-missing-args,
+    GNU rsync 3.1+), so no shell command ever runs on the remote host.
     """
+    rels = inside_remote(deleted_rels)
+    folders = missing_parent_dirs(rels, repo_root)
     if is_ssh_remote(remote):
-        rc = sync_batch(deleted_rels, repo_root, remote, rsync=rsync, delete_missing=True)
-        if rc != 0:
-            emit(f"! remote delete failed: rsync exited with code {rc}", "red")
+        rc = sync_batch(rels, repo_root, remote, rsync=rsync, delete_missing=True, quiet=quiet)
+        if rc == 0:
+            # One pass per depth: rsync only removes a folder that is already empty,
+            # and stays silent here about folders that still hold remote-only files
+            for level in folders:
+                sync_batch(level, repo_root, remote, rsync=rsync, delete_missing=True, quiet=True)
         return rc
-    for rel in inside_remote(deleted_rels):
-        target = Path(remote.rstrip("/")) / rel
-        target.unlink(missing_ok=True)
+    base = Path(remote.rstrip("/"))
+    for rel in rels:
+        (base / rel).unlink(missing_ok=True)
+    for level in folders:
+        for folder in level:
+            try:
+                (base / folder).rmdir()
+            except OSError:
+                pass  # not empty, or already gone
     return 0
 
 
@@ -383,6 +469,9 @@ def make_excluded_checker(repo_root: Path, patterns: list[str]):
                 return True
         return False
     return is_excluded
+
+
+RETRY_SECONDS = 10
 
 
 def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float, rsync: list[str] = RSYNC):
@@ -452,25 +541,26 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
 
     global STAMP
     STAMP = True
-    header = f"xsync  {repo_root.name} → {remote}  (watching, Ctrl+C to stop)"
+    header = PinnedHeader(repo_root.name, remote, "ssh" if is_ssh_remote(remote) else "local")
+    total = 0
+    offline = False
     try:
-        with PinnedHeader(header):
+        with header:
             rc = sync_full(repo_root, remote, exclude_file, dry_run=False, rsync=rsync)
             if rc != 0:
-                emit(f"! initial sync failed: rsync exited with code {rc}", "red")
+                emit(f"! initial sync failed: rsync exited with code {rc}", "magenta")
             else:
                 emit("in sync, watching for changes", "dim")
+            total = CHANGES
+            header.set_status(f"{total} changes · last {datetime.now():%H:%M:%S}")
 
             while True:
-                time.sleep(debounce)
+                time.sleep(RETRY_SECONDS if offline else debounce)
                 with lock:
                     batch = list(pending)
                     pending.clear()
                     removals = list(deleted)
                     deleted.clear()
-
-                if not batch and not removals:
-                    continue
 
                 # Anything "deleted" that still exists was overwritten (atomic write) — sync it
                 overwritten = [f for f in removals if (repo_root / f).exists()]
@@ -480,23 +570,78 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
                 # Drop batch entries that no longer exist (temp files from atomic writes)
                 batch = [f for f in batch if (repo_root / f).exists()]
 
-                rc = 0
+                if not batch and not removals:
+                    continue
+
+                codes = []
                 if removals:
-                    if not PRETTY:
+                    if not PRETTY and not offline:
                         emit(f"deleting {len(removals)} file(s): {', '.join(removals)}")
-                    delete_from_remote(removals, repo_root, remote, rsync)
+                    codes.append(delete_from_remote(removals, repo_root, remote, rsync, quiet=offline))
                 if batch:
-                    if not PRETTY:
+                    if not PRETTY and not offline:
                         emit(f"syncing {len(batch)} file(s): {', '.join(batch)}")
-                    rc = sync_batch(batch, repo_root, remote, rsync=rsync)
-                if rc != 0:
-                    emit(f"! rsync exited with code {rc}", "red")
+                    codes.append(sync_batch(batch, repo_root, remote, rsync=rsync, quiet=offline))
+
+                if any(code in CONNECTION_EXIT_CODES for code in codes):
+                    # Keep the changes and try again until the connection is back
+                    with lock:
+                        pending.update(batch)
+                        deleted.update(removals)
+                    if not offline:
+                        offline = True
+                        emit(f"! connection lost; changes are queued and retried every {RETRY_SECONDS}s", "magenta")
+                    header.set_status(f"{len(batch) + len(removals)} queued", "offline")
+                    continue
+
+                if offline:
+                    offline = False
+                    emit("reconnected; queued changes sent", "green")
+                for code in codes:
+                    if code != 0:
+                        emit(f"! rsync exited with code {code}", "magenta")
+                total = CHANGES
+                header.set_status(f"{total} changes · last {datetime.now():%H:%M:%S}")
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
         observer.stop()
         exclude_file.unlink(missing_ok=True)
     observer.join()
+
+
+def cmd_status(repo_root: Path, config: dict, remote: str, rsync: list[str], version: str) -> int:
+    """Show the resolved setup and check the host, without syncing anything."""
+    ssh = is_ssh_remote(remote)
+    found = re.search(r"version\s+(\S+)", version)
+    flavor = f"GNU rsync {found.group(1)}" if is_gnu_rsync3(version) and found else "not GNU rsync 3.x"
+    try:
+        import watchdog  # noqa: F401
+        watching = "available"
+    except ImportError:
+        watching = "watchdog is not installed (pip install watchdog)"
+    reason = unsafe_remote_reason(remote)
+    if not ssh:
+        reachable = "folder exists" if Path(remote).is_dir() else "folder not found"
+    else:
+        reachable = "reachable" if ssh_reachable(remote, rsync) else "not reachable"
+    ok = reason is None and reachable in ("reachable", "folder exists")
+
+    print(format_header("status", repo_root.name, remote))
+    rows = [
+        ("project", str(repo_root)),
+        ("config", str(repo_root / ".xsync.toml")),
+        ("remote", f"{remote}  ({'ssh' if ssh else 'local path'})"),
+        ("host" if ssh else "target", reachable),
+        ("full sync", "allowed" if reason is None else f"refused: {reason}"),
+        ("rsync", f"{rsync[0]}  ({flavor})"),
+        ("rsync_args", " ".join(config.get("rsync_args", [])) or "none"),
+        ("exclude", f"{len(config.get('exclude', []))} patterns"),
+        ("--watch", watching),
+    ]
+    for label, value in rows:
+        print(f"  {paint(label.ljust(11), 'dim')} {value}")
+    return 0 if ok else 1
 
 
 def cmd_init():
@@ -519,7 +664,7 @@ def parse_flag_value(args: list[str], flag: str, default):
     return default
 
 
-KNOWN_FLAGS = {"--init", "--dry-run", "--watch", "--interval", "--verbose", "--help", "-h"}
+KNOWN_FLAGS = {"--init", "--dry-run", "--watch", "--interval", "--status", "--verbose", "--version", "--help", "-h"}
 
 
 def main():
@@ -527,6 +672,10 @@ def main():
 
     if "--help" in args or "-h" in args:
         print(__doc__.strip())
+        return
+
+    if "--version" in args:
+        print(f"xsync {__version__}")
         return
 
     # Never fall through to a sync on a mistyped option
@@ -575,7 +724,14 @@ def main():
         PRETTY = "--verbose" not in args
     else:
         print(f"warning: {rsync} is not GNU rsync 3.x; some flags may behave differently (brew install rsync).")
-    rsync = [rsync, *config.get("rsync_args", [])]
+    extra_args = list(config.get("rsync_args", []))
+    if is_ssh_remote(remote) and "RSYNC_RSH" not in os.environ:
+        # Before the user's flags, so an -e in rsync_args still wins
+        extra_args = ["-e", SSH_COMMAND, *extra_args]
+    rsync = [rsync, *extra_args]
+
+    if "--status" in args:
+        sys.exit(cmd_status(repo_root, config, remote, rsync, version))
 
     # Full syncs (including the initial one in watch mode) run rsync --delete
     if watch or not file_arg:
@@ -598,7 +754,7 @@ def main():
         cmd_watch(repo_root, remote, exclude_patterns, debounce, rsync)
         return
 
-    header = f"xsync  {repo_root.name} → {remote}" + ("  (dry run)" if dry_run else "")
+    transport = "ssh" if is_ssh_remote(remote) else "local"
 
     if file_arg:
         file_path = Path(file_arg)
@@ -607,16 +763,16 @@ def main():
         except ValueError:
             print(f"error: file is outside the project: {file_path}")
             sys.exit(1)
-        print(paint(header, "bold"), flush=True)
+        print(format_header("dry-run" if dry_run else "file", repo_root.name, remote, transport), flush=True)
         rc = sync_file(file_path, repo_root, remote, dry_run, rsync)
     else:
         exclude_file = write_exclude_file(repo_root, exclude_patterns)
-        print(paint(header, "bold"), flush=True)
+        print(format_header("dry-run" if dry_run else "sync", repo_root.name, remote, transport), flush=True)
         rc = sync_full(repo_root, remote, exclude_file, dry_run, rsync)
         exclude_file.unlink(missing_ok=True)
 
     if rc != 0:
-        print(paint(f"rsync exited with code {rc}", "red"))
+        print(paint(f"rsync exited with code {rc}", "magenta"))
         sys.exit(rc)
 
 

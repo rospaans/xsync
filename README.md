@@ -18,7 +18,9 @@ SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now t
 - **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) is reported within 5 seconds, before any sync and before `--watch` starts.
 - **rsync flavor**: xsync uses `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`, and prints a one-line warning if it is not GNU rsync 3.x (recent macOS ships openrsync). An optional `rsync = "/path/to/rsync"` key overrides the choice (see Troubleshooting).
 - **Extra rsync flags**: new optional `rsync_args = [...]` key, for example for server folders on storage that rejects permission, ownership or timestamp changes (see "Remotes on a network share").
-- **Readable output**: one line per new, updated or deleted file and a short summary, instead of rsync's raw output (`--verbose` brings that back).
+- **Readable output**: a header naming the mode, one line per new, updated or deleted file, and a short summary, instead of rsync's raw output (`--verbose` brings that back). In `--watch` the header stays fixed at the top with a live status.
+- **Watch survives connection drops**: changes are queued and retried until the server is reachable again, and emptied folders are removed from the remote.
+- **`xsync --status`** shows the resolved setup and checks the host without syncing; `xsync --version` prints the version.
 - **Tests**: `python -m pytest tests`.
 
 ## What it does
@@ -342,7 +344,9 @@ xsync --dry-run            # show what would sync, no transfer
 xsync file.py --dry-run    # dry-run single-file mode
 xsync --watch              # watch for changes and sync automatically
 xsync --watch --interval 5 # watch with a 5-second debounce window
+xsync --status             # show the resolved setup and check the host; no sync
 xsync --verbose            # show rsync's raw output instead of the summary
+xsync --version            # show the version
 xsync --help               # show usage
 ```
 
@@ -350,8 +354,19 @@ An unknown option is an error; xsync never falls back to a sync on a typo.
 
 ### Reading the output
 
+The first line always says which mode is running, what is synced where, and how:
+
 ```
-xsync  my_project → myhost:/data/projects/you/my_project/
+xsync sync     my_project → myhost:/data/projects/you/my_project/  ssh
+xsync dry-run  my_project → myhost:/data/projects/you/my_project/  ssh
+xsync file     my_project → myhost:/data/projects/you/my_project/  ssh
+xsync watch    my_project → myhost:/data/projects/you/my_project/  ssh · 12 changes · last 15:26:52 · Ctrl+C to stop
+```
+
+In a terminal the mode is shown as a colored badge. Below the header, each change is one line:
+
+```
+xsync sync  my_project → myhost:/data/projects/you/my_project/  ssh
   + src/new_module.py
   ~ README.md
   - old/unused.py
@@ -359,31 +374,58 @@ xsync  my_project → myhost:/data/projects/you/my_project/
 1 new, 1 updated, 1 deleted · 0.8s
 ```
 
-| Mark | Meaning |
-|---|---|
-| `+` | New on the remote. |
-| `~` | Updated on the remote. |
-| `-` | Deleted from the remote. |
-| `!` | A message or error from rsync or SSH, shown as received. |
+| Mark | Color | Meaning |
+|---|---|---|
+| `+` | green | New on the remote. |
+| `~` | blue | Updated on the remote. |
+| `-` | red | Deleted from the remote. |
+| `!` | yellow | A message or warning from rsync or SSH, shown as received. |
+| `!` | magenta | A failure reported by xsync, such as a lost connection or rsync's exit code. |
 
-The last line is a summary, or "Already up to date". If rsync fails, a final line gives its exit code. With `--dry-run` the header says "(dry run)" and the summary says "would be".
+The last line is a summary, or "Already up to date". With `--dry-run` it says "would be".
 
-In `--watch` mode the header stays fixed at the top of the terminal and each change appears below it with the time:
+### Watch mode
+
+`xsync --watch` does one full sync and then sends changes as you make them. The header stays fixed at the top of the terminal and shows a running count and the time of the last change. Each change appears below it with the time:
 
 ```
-xsync  my_project → myhost:/data/projects/you/my_project/  (watching, Ctrl+C to stop)
+ WATCH   my_project → myhost:/data/projects/you/my_project/  ssh · 4 changes · last 15:26:41 · Ctrl+C to stop
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 15:10:08  in sync, watching for changes
-15:10:24  ~ src/model.py
-15:11:02  - notes/draft.md
+15:26:27  + notes/draft.md
+15:26:31  ~ src/model.py
+15:26:41  - notes/draft.md
+15:26:41  - notes/
 ```
 
-Colors and the fixed header are used in a terminal and left out when the output is piped; `NO_COLOR` switches colors off. All of this needs GNU rsync 3.x; with another rsync, or with `--verbose`, you get rsync's own output.
+- **Deleted files** are removed from the remote. A folder that disappears locally is removed too, but only once it is empty on the remote, so files that exist only on the server are never touched.
+- **If the connection drops**, xsync keeps running. Changes are queued, the header switches to `OFFLINE` with the number of queued changes, and xsync retries every 10 seconds. When the connection is back the queued changes are sent. A dead connection is noticed within about a minute.
+
+### Checking the setup
+
+`xsync --status` syncs nothing. It shows what xsync would use and whether the server answers:
+
+```
+xsync status  my_project → myhost:/data/projects/you/my_project/
+  project     /home/you/work/my_project
+  config      /home/you/work/my_project/.xsync.toml
+  remote      myhost:/data/projects/you/my_project/  (ssh)
+  host        reachable
+  full sync   allowed
+  rsync       /opt/homebrew/bin/rsync  (GNU rsync 3.5.1)
+  rsync_args  none
+  exclude     16 patterns
+  --watch     available
+```
+
+Colors and the fixed header are used in a terminal and left out when the output is piped; `NO_COLOR` switches colors off. The summarized output needs GNU rsync 3.x; with another rsync, or with `--verbose`, you get rsync's own output.
 
 ## How it works
 
 - **Full sync** (`xsync`): invokes `rsync -avz --delete` over SSH with the exclude list. The remote becomes an exact mirror of the local project, minus excluded paths.
 - **Single-file sync** (`xsync path/to/file`): transfers just that file, preserving its relative path under the remote root and creating missing folders.
-- **Watch** (`xsync --watch`): one full sync, then pushes changed files in batches and removes deleted files from the remote.
+- **Watch** (`xsync --watch`): one full sync, then pushes changed files in batches and removes deleted files from the remote. Failed batches are retried when the connection returns.
+- **SSH options**: over SSH, xsync runs rsync with `ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3`, so it never waits for a password and notices a dead connection. If you set `RSYNC_RSH`, or pass your own `-e` in `rsync_args`, yours is used instead.
 
 ## Optional: local paths and mounted volumes
 
@@ -414,6 +456,9 @@ The `remote` path is empty, `/`, or a home directory. Point it at a dedicated pr
 
 **"file is outside the project"**
 The file path passed to `xsync` is not inside the project root. `xsync` only syncs files within the project.
+
+**Something is off and I don't know where to start**
+Run `xsync --status`. It shows the project, remote, rsync binary and flags in use, and whether the server answers.
 
 **I need to see exactly what rsync did**
 Run the same command with `--verbose` to get rsync's raw output.

@@ -319,6 +319,75 @@ def test_verbose_shows_raw_rsync_output(project):
     assert tree(dst) == {"a.txt", "sub/b.txt"}
 
 
+def test_format_header_plain():
+    assert xsync.format_header("sync", "proj", "host:/srv/proj/", "ssh") == "xsync sync  proj → host:/srv/proj/  ssh"
+    assert xsync.format_header("watch", "proj", "host:/srv/proj/") == "xsync watch  proj → host:/srv/proj/"
+
+
+@pytest.mark.parametrize("width", [20, 40, 60, 80, 200])
+def test_format_header_fits_width(width):
+    line = xsync.format_header("watch", "a_long_project_name", "host:some/quite/long/remote/folder/", "ssh · 12 changes", width)
+    assert len(line) <= max(width, len("xsync watch") + 3)
+    assert line.startswith("xsync watch")
+
+
+def test_missing_parent_dirs(tmp_path):
+    (tmp_path / "kept").mkdir()
+    rels = ["gone/deep/a.txt", "gone/b.txt", "kept/c.txt", "top.txt"]
+    assert xsync.missing_parent_dirs(rels, tmp_path) == [["gone/deep"], ["gone"]]
+
+
+def test_local_delete_removes_emptied_folders_only(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    for rel in ("gone/deep/a.txt", "shared/b.txt", "shared/remote_only.txt"):
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dst / rel).write_text("x")
+
+    assert xsync.delete_from_remote(["gone/deep/a.txt", "shared/b.txt"], src, str(dst) + "/") == 0
+    assert not (dst / "gone").exists()
+    assert tree(dst) == {"shared/remote_only.txt"}
+
+
+@needs_gnu_rsync
+def test_rsync_removes_emptied_folders_only(tmp_path):
+    """The per-depth passes delete_from_remote runs over SSH, exercised against a local folder."""
+    tmp_path = tmp_path.resolve()
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    for rel in ("gone/deep/a.txt", "shared/b.txt", "shared/remote_only.txt"):
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dst / rel).write_text("x")
+    rsync = [xsync.resolve_rsync({})]
+    remote = str(dst) + "/"
+    rels = ["gone/deep/a.txt", "shared/b.txt"]
+
+    assert xsync.sync_batch(rels, src, remote, rsync=rsync, delete_missing=True) == 0
+    for level in xsync.missing_parent_dirs(rels, src):
+        xsync.sync_batch(level, src, remote, rsync=rsync, delete_missing=True, quiet=True)
+
+    assert not (dst / "gone").exists()
+    assert tree(dst) == {"shared/remote_only.txt"}
+
+
+@needs_rsync
+def test_status_reports_without_syncing(project):
+    src, dst = project
+    result = run_xsync(src, "--status")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "xsync status" in result.stdout
+    assert str(dst) in result.stdout
+    assert "folder exists" in result.stdout
+    assert tree(dst) == set()
+
+
+def test_version(project):
+    src, dst = project
+    result = run_xsync(src, "--version")
+    assert result.stdout.strip() == f"xsync {xsync.__version__}"
+    assert tree(dst) == set()
+
+
 # --- end to end ------------------------------------------------------------
 
 @pytest.fixture
