@@ -71,11 +71,16 @@ def write_exclude_file(repo_root: Path, patterns: list[str]) -> Path:
     return exclude_path
 
 
+def rsync_flags(remote: str) -> str:
+    """Base rsync flags. Compression only pays off over the network."""
+    return "-avz" if is_ssh_remote(remote) else "-av"
+
+
 def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool) -> int:
     """Sync entire repo to remote."""
     cmd = [
         "rsync",
-        "-avz",
+        rsync_flags(remote),
         "--delete",
         f"--exclude-from={exclude_file}",
         str(repo_root) + "/",
@@ -101,7 +106,7 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     files_from.write_text("\n".join(batch) + "\n")
     cmd = [
         "rsync",
-        "-avz",
+        rsync_flags(remote),
         "--files-from", str(files_from),
         str(repo_root) + "/",
         remote,
