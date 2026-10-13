@@ -534,6 +534,25 @@ def test_session_rows_never_exceed_terminal_width(width, colors, monkeypatch):
         assert len(visible(row)) <= width
 
 
+def test_big_text_draws_three_equal_rows():
+    for word in xsync.BAR_LABEL.values():
+        rows = xsync.big_text(word)
+        assert len(rows) == 3
+        assert len({len(row) for row in rows}) == 1
+        assert len(rows[0]) == 4 * len(word) - 1
+        assert set("".join(rows)) <= set(" ▄▀█")
+    assert xsync.big_text("X") == ["█ █", "▄▀▄", "▀ ▀"]
+
+
+def test_banner_uses_big_letters_only_when_there_is_room(monkeypatch):
+    monkeypatch.setattr(xsync, "colors_on", lambda: True)
+    screen = make_screen()
+    assert len(screen.banner(200)) == 4 and "█" in visible("".join(screen.banner(200)))
+    assert len(screen.banner(50)) == 3 and "XSYNC" in visible(screen.banner(50)[1])
+    for width in (50, 66, 67, 120, 200):
+        assert all(len(visible(row)) == width for row in screen.banner(width))
+
+
 def test_bar_shows_transport_state_and_counter():
     screen = make_screen()
     screen.state, screen.detail = "in sync at 15:52", "28 changes · last 15:44:16"

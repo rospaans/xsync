@@ -187,6 +187,29 @@ BUTTON_LABEL = "38;5;255;48;5;238"
 BUTTON_GAP = 2
 
 
+# A 3x5 pixel font for the mode name in the banner. A terminal cannot enlarge
+# text, so big letters are drawn from half-block characters, two pixels per row.
+BIG_FONT = {
+    "A": ("010", "101", "111", "101", "101"), "C": ("111", "100", "100", "100", "111"),
+    "E": ("111", "100", "110", "100", "111"), "F": ("111", "100", "110", "100", "100"),
+    "H": ("101", "101", "111", "101", "101"), "I": ("111", "010", "010", "010", "111"),
+    "L": ("100", "100", "100", "100", "111"), "N": ("110", "101", "101", "101", "101"),
+    "O": ("111", "101", "101", "101", "111"), "S": ("111", "100", "111", "001", "111"),
+    "T": ("111", "010", "010", "010", "010"), "W": ("101", "101", "101", "111", "101"),
+    "X": ("101", "101", "010", "101", "101"), "Y": ("101", "101", "010", "010", "010"),
+}
+
+
+def big_text(word: str) -> list[str]:
+    """Render a word in BIG_FONT as three rows of half-block characters."""
+    pixels = ["0".join(BIG_FONT[letter][row] for letter in word) for row in range(5)] + [""]
+    rows = []
+    for top, bottom in zip(pixels[0::2], pixels[1::2]):
+        bottom = bottom.ljust(len(top), "0")
+        rows.append("".join(" ▄▀█"[int(t) * 2 + int(b)] for t, b in zip(top, bottom)))
+    return rows
+
+
 def styled(segments: list[tuple[str, str]], background: str = "") -> str:
     """Join (text, color code) pairs into one string; plain text when colors are off."""
     if not colors_on():
@@ -233,9 +256,10 @@ class Screen:
 
     # --- the fixed rows
 
-    def bar(self, width: int) -> str:
-        """What is synced on the left, the current state on the right."""
-        left = [(f" {BAR_LABEL[self.mode]} ", BAR_BADGE[self.mode]), (f"  {self.name}", "1;97"), ("  →  ", "38;5;250"),
+    def bar(self, width: int, badge: tuple[str, str] | None = None) -> str:
+        """The mode badge, what is synced where, and on the right the current state."""
+        badge = badge or (f" {BAR_LABEL[self.mode]} ", BAR_BADGE[self.mode])
+        left = [badge, (f"  {self.name}", "1;97"), ("  →  ", "38;5;250"),
                 (f" {self.transport.upper()} ", BAR_TRANSPORT), (f" {self.remote}", "38;5;250")]
         right = [("●", BAR_DOT[self.level]), (f" {self.state}", "38;5;255")]
         # detail is "N changes · last HH:MM:SS": the count as a tag, the time after it
@@ -298,12 +322,27 @@ class Screen:
             rows.append(styled(segments))
         return rows
 
+    def banner(self, width: int) -> list[str]:
+        """The status bar as a tall band, with the mode name in big letters when there is room."""
+        style = BAR_BADGE[self.mode]
+        letters = big_text(BAR_LABEL[self.mode])
+        badge_width = len(letters[0]) + 4
+        if width < badge_width + 45:
+            # Narrow: the one-row bar, with a row of its background above and below
+            padding = styled([(" " * width, "")], BAR_BACKGROUND)
+            return [padding, self.bar(width), padding]
+        rest = (" " * (width - badge_width), "")
+        rows = [styled([(" " * badge_width, style), rest], BAR_BACKGROUND)]
+        for index, line in enumerate(letters):
+            badge = (f"  {line}  ", style)
+            # The details go next to the middle row of the letters
+            rows.append(self.bar(width, badge) if index == 1 else styled([badge, rest], BAR_BACKGROUND))
+        return rows
+
     def header_rows(self, width: int) -> list[str]:
         """Everything that stays fixed at the top, one string per terminal row."""
         if colors_on():
-            # A three-row banner: the bar with a row of its background above and below
-            padding = styled([(" " * width, "")], BAR_BACKGROUND)
-            banner = [padding, self.bar(width), padding]
+            banner = self.banner(width)
         else:
             banner = [self.bar(width)]
         rule = paint("─" * max(width - 1, 0), "dim")
