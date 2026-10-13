@@ -299,21 +299,15 @@ class Screen:
             rows.append(styled(segments))
         return rows
 
-    def banner(self, width: int) -> list[str]:
-        """The status bar as a three-row band, with the mode name on a block of its full height."""
-        style = BAR_BADGE[self.mode]
+    def banner(self, width: int) -> str:
+        """The status bar, with the mode name letter-spaced on a wide badge when there is room."""
         label = BAR_LABEL[self.mode]
-        # Letter-spaced on a wide block when there is room, compact otherwise
         text = f"   {' '.join(label)}   " if width >= 90 else f" {label} "
-        edge = styled(clip_segments([(" " * len(text), style), (" " * width, "")], width), BAR_BACKGROUND)
-        return [edge, self.bar(width, (text, style)), edge]
+        return self.bar(width, (text, BAR_BADGE[self.mode]))
 
     def header_rows(self, width: int) -> list[str]:
         """Everything that stays fixed at the top, one string per terminal row."""
-        if colors_on():
-            banner = self.banner(width)
-        else:
-            banner = [self.bar(width)]
+        banner = [self.banner(width) if colors_on() else self.bar(width)]
         rule = paint("─" * max(width - 1, 0), "dim")
         return [*banner, "", *self.key_rows(width), self.message_row(width), rule]
 

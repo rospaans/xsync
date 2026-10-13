@@ -534,15 +534,14 @@ def test_session_rows_never_exceed_terminal_width(width, colors, monkeypatch):
         assert len(visible(row)) <= width
 
 
-def test_banner_is_three_rows_with_a_full_height_badge(monkeypatch):
+def test_banner_is_one_row(monkeypatch):
     monkeypatch.setattr(xsync, "colors_on", lambda: True)
     screen = make_screen()
-    assert "X S Y N C" in visible(screen.banner(200)[1])   # letter-spaced when wide
-    assert " XSYNC " in visible(screen.banner(60)[1])       # compact when narrow
+    assert "X S Y N C" in visible(screen.banner(200))   # letter-spaced when wide
+    assert " XSYNC " in visible(screen.banner(60))       # compact when narrow
     for width in (5, 60, 89, 90, 200):
-        rows = screen.banner(width)
-        assert len(rows) == 3
-        assert all(len(visible(row)) == width for row in rows)
+        assert len(visible(screen.banner(width))) == width
+        assert "\n" not in screen.banner(width)
 
 
 def test_bar_shows_transport_state_and_counter():
