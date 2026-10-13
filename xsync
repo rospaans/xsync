@@ -22,7 +22,7 @@ Usage:
     xsync --help               # show this help
 
 Keys in the session: s sync, w watch on/off, c compare, f sync a file or folder,
-r reconnect, e errors, q quit. Without a terminal (piped, scripted), plain
+r reconnect, i info (the setup, as --status), e errors, q quit. Without a terminal (piped, scripted), plain
 `xsync` syncs once and exits.
 """
 
@@ -189,7 +189,7 @@ BAR_BADGE = {"watch": "1;38;5;16;48;5;78", "idle": "1;38;5;16;48;5;75", "offline
 BAR_LABEL = {"watch": "WATCH", "idle": "XSYNC", "offline": "OFFLINE"}
 BAR_DOT = {"ok": "38;5;78", "busy": "38;5;221", "problem": "38;5;176"}
 SESSION_KEYS = [("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("f", "Path"),
-                ("r", "Reconnect"), ("e", "Errors"), ("q", "Quit")]
+                ("r", "Reconnect"), ("i", "Info"), ("e", "Errors"), ("q", "Quit")]
 # Buttons: a light key cap next to a darker label; the cap is colored to show state
 BUTTON_CAP, BUTTON_CAP_ON, BUTTON_CAP_ALERT = "1;38;5;16;48;5;252", "1;38;5;16;48;5;78", "1;38;5;16;48;5;176"
 BUTTON_LABEL = "38;5;255;48;5;238"
@@ -672,7 +672,7 @@ IDLE = "in sync, watching for changes"
 
 
 def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float,
-                rsync: list[str] = RSYNC, watch: bool = False, interactive: bool = False):
+                rsync: list[str] = RSYNC, watch: bool = False, interactive: bool = False, status=None):
     """The session: compare, sync and watch on single key presses.
 
     Without a terminal there are no keys, and this is plain watch mode.
@@ -917,7 +917,15 @@ def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debou
         problems.clear()
         screen.set_message("")
 
-    actions = {"s": full_sync, "c": compare, "f": sync_one, "e": show_problems,
+    def show_status():
+        """List the resolved setup, as `xsync --status` does."""
+        screen.set_status("checking…", "busy")
+        rows, _ = status()
+        for label, value in rows:
+            emit(f"{label.ljust(11)} {value}", "dim")
+        rest()
+
+    actions = {"s": full_sync, "c": compare, "f": sync_one, "e": show_problems, "i": show_status,
                "r": lambda: check_connection(announce=True),
                "w": lambda: stop_watch() if screen.watching else start_watch()}
 
@@ -954,8 +962,8 @@ def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debou
         exclude_file.unlink(missing_ok=True)
 
 
-def cmd_status(repo_root: Path, config: dict, remote: str, rsync: list[str], version: str) -> int:
-    """Show the resolved setup and check the host, without syncing anything."""
+def status_rows(repo_root: Path, config: dict, remote: str, rsync: list[str], version: str) -> tuple[list, bool]:
+    """The resolved setup as (label, value) rows, and whether a sync could run."""
     ssh = is_ssh_remote(remote)
     found = re.search(r"version\s+(\S+)", version)
     flavor = f"GNU rsync {found.group(1)}" if is_gnu_rsync3(version) and found else "not GNU rsync 3.x"
@@ -968,10 +976,7 @@ def cmd_status(repo_root: Path, config: dict, remote: str, rsync: list[str], ver
     if not ssh:
         reachable = "folder exists" if Path(remote).is_dir() else "folder not found"
     else:
-        reachable = "reachable" if ssh_reachable(remote, rsync) else "not reachable"
-    ok = reason is None and reachable in ("reachable", "folder exists")
-
-    print(format_header("status", repo_root.name, remote))
+        reachable = "reachable" if ssh_reachable(remote, rsync, quiet=True) else "not reachable"
     rows = [
         ("project", str(repo_root)),
         ("config", str(repo_root / ".xsync.toml")),
@@ -981,8 +986,15 @@ def cmd_status(repo_root: Path, config: dict, remote: str, rsync: list[str], ver
         ("rsync", f"{rsync[0]}  ({flavor})"),
         ("rsync_args", " ".join(config.get("rsync_args", [])) or "none"),
         ("exclude", f"{len(config.get('exclude', []))} patterns"),
-        ("--watch", watching),
+        ("watch mode", watching),
     ]
+    return rows, reason is None and reachable in ("reachable", "folder exists")
+
+
+def cmd_status(repo_root: Path, config: dict, remote: str, rsync: list[str], version: str) -> int:
+    """Show the resolved setup and check the host, without syncing anything."""
+    rows, ok = status_rows(repo_root, config, remote, rsync, version)
+    print(format_header("status", repo_root.name, remote))
     for label, value in rows:
         print(f"  {paint(label.ljust(11), 'dim')} {value}")
     return 0 if ok else 1
@@ -1096,7 +1108,8 @@ def main():
     interactive = PRETTY and sys.stdin.isatty() and sys.stdout.isatty()
     if watch or (interactive and not file_arg and not dry_run and "--sync" not in args):
         debounce = float(interval_value) if interval_value is not None else 2.0
-        run_session(repo_root, remote, exclude_patterns, debounce, rsync, watch=watch, interactive=interactive)
+        run_session(repo_root, remote, exclude_patterns, debounce, rsync, watch=watch, interactive=interactive,
+                    status=lambda: status_rows(repo_root, config, remote, rsync, version))
         return
 
     transport = "ssh" if is_ssh_remote(remote) else "local"

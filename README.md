@@ -367,7 +367,7 @@ Running `xsync` in a terminal opens a session. It first compares the project wit
 ```
  XSYNC   my_project  →  myhost:/data/projects/you/my_project/              ● 3 differences at 15:52  ·  0 changes  ·  ssh
 
-  s  Sync    w  Watch off    c  Compare    f  Path    r  Reconnect    e  Errors    q  Quit
+  s  Sync    w  Watch off    c  Compare    f  Path    r  Reconnect    i  Info    e  Errors    q  Quit
 
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 15:52:10  ~ src/model.py  (not synced)
@@ -385,6 +385,7 @@ The top of the screen stays fixed; changes scroll below it. Each key is drawn as
 | `c` | Compare: list what differs between the project and the server, without changing anything. |
 | `f` | Sync one file or folder. Type, paste or drag a path into the terminal and press Enter (Esc cancels). A folder is mirrored like a full sync, limited to that folder. |
 | `r` | Check the connection now and, when it is back, send what was queued. |
+| `i` | Info: show the resolved setup (project, remote, whether the host answers, rsync and flags in use), the same as `xsync --status`. |
 | `e` | List the warnings and errors recorded so far, and clear the problem line. |
 | `q` | Quit. Ctrl+C works too. |
 
@@ -441,7 +442,7 @@ xsync status  my_project → myhost:/data/projects/you/my_project/
   rsync       /opt/homebrew/bin/rsync  (GNU rsync 3.5.1)
   rsync_args  none
   exclude     16 patterns
-  --watch     available
+  watch mode  available
 ```
 
 Colors and the fixed header are used in a terminal and left out when the output is piped; `NO_COLOR` switches colors off. The summarized output needs GNU rsync 3.x; with another rsync, or with `--verbose`, you get rsync's own output.
