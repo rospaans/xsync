@@ -3,6 +3,10 @@
 xsync: small rsync wrapper for local-to-remote project sync.
 Reads .xsync.toml from the project root (current dir or any parent).
 
+The remote is normally an SSH target, "host:/path/to/project/", where host is
+an alias from ~/.ssh/config (key auth, ideally with ControlMaster so repeated
+syncs reuse one connection). A local path (e.g. a mounted volume) also works.
+
 Usage:
     xsync                      # sync entire project
     xsync path/to/file.py      # sync a single file
@@ -29,9 +33,13 @@ STARTER_CONFIG = """\
 # xsync configuration
 # The local path is auto-detected as the directory containing this file.
 
-# Remote destination: local path (e.g. mounted volume) or ssh target
-remote = "/Volumes/your-volume/your-project/"
-# remote = "user@host:/path/to/project/"
+# Remote destination: SSH target, where the host is an alias from ~/.ssh/config
+remote = "myhost:/path/to/project/"
+# Alternative: a local path (e.g. mounted volume)
+# remote = "/Volumes/your-volume/your-project/"
+
+# rsync binary to use (default: /opt/homebrew/bin/rsync if present, else rsync from PATH)
+# rsync = "/opt/homebrew/bin/rsync"
 
 # Patterns to exclude from sync (rsync exclude-from syntax)
 exclude = [

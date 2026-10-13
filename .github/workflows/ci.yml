@@ -42,7 +42,7 @@ jobs:
           cd "$SRC"
           python "$GITHUB_WORKSPACE/xsync" --init
           # -i.bak form is portable across GNU sed (Linux) and BSD sed (macOS)
-          sed -i.bak "s|/Volumes/your-volume/your-project/|$DST/|" .xsync.toml
+          sed -i.bak "s|myhost:/path/to/project/|$DST/|" .xsync.toml
           rm -f .xsync.toml.bak
           echo hello > file.txt
           python "$GITHUB_WORKSPACE/xsync" --dry-run

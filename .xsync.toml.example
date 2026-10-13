@@ -1,9 +1,13 @@
 # xsync configuration
 # The local path is auto-detected as the directory containing this file.
 
-# Remote destination: local path (e.g. mounted volume) or ssh target
-remote = "/Volumes/your-volume/your-project/"
-# remote = "user@host:/path/to/project/"
+# Remote destination: SSH target, where the host is an alias from ~/.ssh/config
+remote = "myhost:/path/to/project/"
+# Alternative: a local path (e.g. mounted volume)
+# remote = "/Volumes/your-volume/your-project/"
+
+# rsync binary to use (default: /opt/homebrew/bin/rsync if present, else rsync from PATH)
+# rsync = "/opt/homebrew/bin/rsync"
 
 # Patterns to exclude from sync (rsync exclude-from syntax)
 exclude = [
