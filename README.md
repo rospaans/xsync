@@ -19,6 +19,7 @@ SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now t
 - **rsync flavor**: xsync uses `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`, and prints a one-line warning if it is not GNU rsync 3.x (recent macOS ships openrsync). An optional `rsync = "/path/to/rsync"` key overrides the choice (see Troubleshooting).
 - **Extra rsync flags**: new optional `rsync_args = [...]` key, for example for server folders on storage that rejects permission, ownership or timestamp changes (see "Remotes on a network share").
 - **Readable output**: a header naming the mode, one line per new, updated or deleted file, and a short summary, instead of rsync's raw output (`--verbose` brings that back). In `--watch` the header stays fixed at the top with a live status.
+- **Interactive session**: plain `xsync` opens a screen with a status bar and single-key actions: sync, watch on/off, compare, sync one file or folder, reconnect, errors. `xsync --sync` is the one-off full sync.
 - **Watch survives connection drops**: changes are queued and retried until the server is reachable again, and emptied folders are removed from the remote.
 - **`xsync --status`** shows the resolved setup and checks the host without syncing; `xsync --version` prints the version.
 - **Tests**: `python -m pytest tests`.
@@ -28,7 +29,9 @@ SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now t
 `xsync` reads a `.xsync.toml` file from the project root and runs `rsync` over SSH against the `remote` target declared there. The logic lives in a single script on your `$PATH`; each project only needs a declarative config. It works from any terminal and any editor.
 
 - Full sync: mirrors the project to the remote, respecting an exclude list.
-- Single-file sync: pushes one file while preserving its relative path.
+- File or folder sync: pushes one file, or mirrors one folder, while preserving its relative path.
+- Compare: shows what differs between the project and the server without changing anything.
+- An interactive session that offers all of these on single keys.
 - Watch mode: keeps the remote up to date while you edit.
 - Dry-run mode: preview what would change without transferring.
 
@@ -295,7 +298,7 @@ Use a folder that belongs to this project alone. A full sync deletes anything in
 
 ```bash
 xsync --dry-run        # lists what would be copied or deleted; changes nothing
-xsync                  # first real sync
+xsync --sync           # first real sync
 ```
 
 Check the destination printed on the first line of the dry run before running the real sync.
@@ -341,30 +344,65 @@ rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-di
 ## Usage
 
 ```bash
-xsync                      # sync entire project to remote
-xsync path/to/file.py      # sync a single file
-xsync --init               # create a starter .xsync.toml in current dir
+xsync                      # open the session: compare, then sync or watch with single keys
+xsync --sync               # sync the entire project once and exit
+xsync path/to/file.py      # sync a single file or folder
 xsync --dry-run            # show what would sync, no transfer
-xsync file.py --dry-run    # dry-run single-file mode
-xsync --watch              # watch for changes and sync automatically
+xsync file.py --dry-run    # dry-run for a single file or folder
+xsync --watch              # open the session with watch mode already on
 xsync --watch --interval 5 # watch with a 5-second debounce window
+xsync --init               # create a starter .xsync.toml in current dir
 xsync --status             # show the resolved setup and check the host; no sync
 xsync --verbose            # show rsync's raw output instead of the summary
 xsync --version            # show the version
 xsync --help               # show usage
 ```
 
-An unknown option is an error; xsync never falls back to a sync on a typo.
+`xsync` walks up from the current directory to find `.xsync.toml`, so you can run it from any subdirectory of the project. An unknown option is an error; xsync never falls back to a sync on a typo.
 
-### Reading the output
+### The session
 
-The first line always says which mode is running, what is synced where, and how:
+Running `xsync` in a terminal opens a session. It first compares the project with the server, like `git status`, and changes nothing until you press a key:
+
+```
+ XSYNC   my_project  →  myhost:/data/projects/you/my_project/              ● 3 differences at 15:52  ·  0 changes  ·  ssh
+ [s] sync   [w] watch: off   [c] compare   [f] file or folder   [r] reconnect   [e] errors   [q] quit
+ no problems
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+15:52:10  ~ src/model.py  (not synced)
+15:52:10  + notes/plan.md  (not synced)
+15:52:10  - old/unused.py  (not synced)
+15:52:10  3 difference(s), nothing changed; press s to sync
+```
+
+The top four lines stay fixed; changes scroll below them.
+
+| Key | Action |
+|---|---|
+| `s` | Sync the whole project now. |
+| `w` | Switch watch mode on or off. Switching it on does a full sync first, then sends changes as you make them. |
+| `c` | Compare: list what differs between the project and the server, without changing anything. |
+| `f` | Sync one file or folder. Type, paste or drag a path into the terminal and press Enter (Esc cancels). A folder is mirrored like a full sync, limited to that folder. |
+| `r` | Check the connection now and, when it is back, send what was queued. |
+| `e` | List the warnings and errors recorded so far, and clear the problem line. |
+| `q` | Quit. Ctrl+C works too. |
+
+- **The bar** shows the mode (`XSYNC` when idle, `WATCH`, or `OFFLINE`), what is synced where, and on the right the current state behind a dot: green when in sync, yellow when busy or when there are differences, magenta for problems.
+- **The problem line** keeps the most recent warning or error in view until you press `e`.
+- **The terminal tab title** shows the state too, so you can see it when the terminal is in the background.
+- **If the connection drops**, the session keeps running. It checks the server once a minute even when nothing changes; when offline, the bar says so, changes made in watch mode are queued, and xsync retries every 10 seconds.
+- **In watch mode**, deleted files are removed from the remote. A folder that disappears locally is removed too, but only once it is empty on the remote, so files that exist only on the server are never touched.
+
+The session needs a terminal and GNU rsync 3.x. When the output is piped or redirected, `xsync` syncs once and exits, and `xsync --watch` runs as plain watch mode without keys.
+
+### Output of one-off commands
+
+Commands that run once and exit (`--sync`, `--dry-run`, a file or folder) print a header that says which mode is running, what is synced where, and how:
 
 ```
 xsync sync     my_project → myhost:/data/projects/you/my_project/  ssh
 xsync dry-run  my_project → myhost:/data/projects/you/my_project/  ssh
 xsync file     my_project → myhost:/data/projects/you/my_project/  ssh
-xsync watch    my_project → myhost:/data/projects/you/my_project/  in sync, watching for changes · 12 changes · last 15:26:52 · ssh
 ```
 
 In a terminal the mode is shown as a colored badge. Below the header, each change is one line:
@@ -388,26 +426,6 @@ xsync sync  my_project → myhost:/data/projects/you/my_project/  ssh
 
 The last line is a summary, or "Already up to date". With `--dry-run` it says "would be".
 
-### Watch mode
-
-`xsync --watch` does one full sync and then sends changes as you make them. The header stays fixed at the top of the terminal and always says what xsync is doing: `in sync, watching for changes` when idle, `syncing…` during a batch, or `offline` when the server cannot be reached. It also shows a running count and the time of the last change. Each change appears below it with the time:
-
-```
- WATCH   my_project  →  myhost:/data/projects/you/my_project/          ● in sync, watching for changes  ·  4 changes · last 15:26:41  ·  ssh
-
-15:26:27  + notes/draft.md
-15:26:31  ~ src/model.py
-15:26:41  - notes/draft.md
-15:26:41  - notes/
-```
-
-The header is a full-width bar: the project and remote on the left, the state on the right behind a dot that is green when idle, yellow while syncing and magenta when offline.
-
-On a narrow terminal the header drops details from the right, keeping the state.
-
-- **Deleted files** are removed from the remote. A folder that disappears locally is removed too, but only once it is empty on the remote, so files that exist only on the server are never touched.
-- **If the connection drops**, xsync keeps running. Changes are queued, the header switches to `OFFLINE` and shows how many changes are queued, and xsync retries every 10 seconds. When the connection is back the queued changes are sent. A dead connection is noticed within about a minute.
-
 ### Checking the setup
 
 `xsync --status` syncs nothing. It shows what xsync would use and whether the server answers:
@@ -429,8 +447,8 @@ Colors and the fixed header are used in a terminal and left out when the output 
 
 ## How it works
 
-- **Full sync** (`xsync`): invokes `rsync -avz --delete` over SSH with the exclude list. The remote becomes an exact mirror of the local project, minus excluded paths.
-- **Single-file sync** (`xsync path/to/file`): transfers just that file, preserving its relative path under the remote root and creating missing folders.
+- **Full sync** (`xsync --sync`, or `s` in the session): invokes `rsync -avz --delete` over SSH with the exclude list. The remote becomes an exact mirror of the local project, minus excluded paths.
+- **File or folder sync** (`xsync path/to/file`, or `f` in the session): a file is transferred to the same relative path under the remote root, creating missing folders. A folder is mirrored like a full sync, limited to that folder.
 - **Watch** (`xsync --watch`): one full sync, then pushes changed files in batches and removes deleted files from the remote. Failed batches are retried when the connection returns.
 - **SSH options**: over SSH, xsync runs rsync with `ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3`, so it never waits for a password and notices a dead connection. If you set `RSYNC_RSH`, or pass your own `-e` in `rsync_args`, yours is used instead.
 
@@ -461,8 +479,8 @@ The host is down, your key is not loaded (`ssh-add`), or the VPN is not connecte
 **"refusing to sync with --delete"**
 The `remote` path is empty, `/`, or a home directory. Point it at a dedicated project directory.
 
-**"file is outside the project"**
-The file path passed to `xsync` is not inside the project root. `xsync` only syncs files within the project.
+**"not found inside the project"**
+The file or folder passed to `xsync` (or entered with `f`) does not exist, or is not inside the project root. `xsync` only syncs paths within the project.
 
 **Something is off and I don't know where to start**
 Run `xsync --status`. It shows the project, remote, rsync binary and flags in use, and whether the server answers.

@@ -8,23 +8,30 @@ an alias from ~/.ssh/config (key auth, ideally with ControlMaster so repeated
 syncs reuse one connection). A local path (e.g. a mounted volume) also works.
 
 Usage:
-    xsync                      # sync entire project
-    xsync path/to/file.py      # sync a single file
-    xsync --init               # create a starter .xsync.toml in current dir
+    xsync                      # open the session: compare, then sync or watch with single keys
+    xsync --sync               # sync the entire project once and exit
+    xsync path/to/file.py      # sync a single file or folder
     xsync --dry-run            # show what would be synced, no transfer
-    xsync file.py --dry-run    # dry-run single-file mode
-    xsync --watch              # watch for changes and sync automatically
+    xsync file.py --dry-run    # dry-run for a single file or folder
+    xsync --watch              # open the session with watch mode already on
     xsync --watch --interval 5 # watch with a 5-second debounce window
+    xsync --init               # create a starter .xsync.toml in current dir
     xsync --status             # show the resolved setup and check the host; no sync
     xsync --verbose            # show rsync's raw output instead of the summary
     xsync --version            # show the version
     xsync --help               # show this help
+
+Keys in the session: s sync, w watch on/off, c compare, f sync a file or folder,
+r reconnect, e errors, q quit. Without a terminal (piped, scripted), plain
+`xsync` syncs once and exits.
 """
 
 __version__ = "0.2.0"
 
 import os
 import re
+import select
+import shlex
 import shutil
 import signal
 import sys
@@ -33,6 +40,7 @@ import tomllib
 import fnmatch
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 
@@ -112,10 +120,13 @@ def is_gnu_rsync3(version_output: str) -> bool:
 # Set by main(): summarize rsync's output instead of passing it through.
 # Needs GNU rsync 3.x; --verbose and other rsync flavors keep the raw output.
 PRETTY = False
-# Set by cmd_watch(): prefix each output line with the time
+# Set by run_session(): prefix each output line with the time
 STAMP = False
-# Number of new, updated and deleted paths reported so far
+# Number of new, updated and deleted paths sent so far, and the counts of the last rsync run
 CHANGES = 0
+LAST_COUNTS = {"new": 0, "updated": 0, "deleted": 0}
+# Set by run_session(): called with the text of every warning and error
+PROBLEM_HOOK = None
 
 COLORS = {
     # 256-color blue and red: the basic ones are too dark on dark terminal themes
@@ -136,10 +147,17 @@ def paint(text: str, color: str | None) -> str:
     return f"\033[{COLORS[color]}m{text}\033[0m"
 
 
-def emit(text: str, color: str | None = None):
-    """Print one line below the header: time-stamped while watching, indented otherwise."""
+def emit(text: str, color: str | None = None, note: str = ""):
+    """Print one line below the header: time-stamped in a session, indented otherwise."""
     prefix = f"{datetime.now():%H:%M:%S}  " if STAMP else "  "
-    print(prefix + paint(text, color), flush=True)
+    print(prefix + paint(text, color) + (paint(f"  ({note})", "dim") if note else ""), flush=True)
+
+
+def warn(text: str, color: str = "yellow"):
+    """Print a warning or error line and hand it to the session, if one is running."""
+    emit(f"! {text}", color)
+    if PROBLEM_HOOK:
+        PROBLEM_HOOK(text)
 
 
 def format_header(mode: str, name: str, remote: str, info: str = "", width: int | None = None) -> str:
@@ -165,101 +183,177 @@ def format_header(mode: str, name: str, remote: str, info: str = "", width: int 
     return line + ("  " + paint(info, "dim") if info else "")
 
 
-# Colors of the watch-mode bar (256-color codes)
+# Colors of the session bar (256-color codes)
 BAR_BACKGROUND = "48;5;236"
-BAR_BADGE = {"watch": "1;38;5;16;48;5;78", "offline": "1;38;5;16;48;5;176"}
-BAR_DOT_IDLE, BAR_DOT_BUSY, BAR_DOT_OFFLINE = "38;5;78", "38;5;221", "38;5;176"
+BAR_BADGE = {"watch": "1;38;5;16;48;5;78", "idle": "1;38;5;16;48;5;75", "offline": "1;38;5;16;48;5;176"}
+BAR_LABEL = {"watch": "WATCH", "idle": "XSYNC", "offline": "OFFLINE"}
+BAR_DOT = {"ok": "38;5;78", "busy": "38;5;221", "problem": "38;5;176"}
+SESSION_KEYS = [("s", "sync"), ("w", "watch"), ("c", "compare"), ("f", "file or folder"),
+                ("r", "reconnect"), ("e", "errors"), ("q", "quit")]
 
 
-class PinnedHeader:
-    """The watch-mode header, fixed at the top of the terminal while output scrolls below it.
+def styled(segments: list[tuple[str, str]], background: str = "") -> str:
+    """Join (text, color code) pairs into one string; plain text when colors are off."""
+    if not colors_on():
+        return "".join(text for text, _ in segments)
+    out = ""
+    for text, code in segments:
+        codes = ";".join(part for part in ("0", background, code) if part)
+        out += f"\033[{codes}m{text}"
+    return out + "\033[0m"
 
-    Uses a terminal scroll region. When output is not a terminal, or with raw
-    rsync output, the header is simply printed once.
+
+def segments_length(segments: list[tuple[str, str]]) -> int:
+    return sum(len(text) for text, _ in segments)
+
+
+class Screen:
+    """The session display.
+
+    In a terminal: a status bar, a row of keys and a message line stay fixed at
+    the top (using a scroll region) while changes scroll below, and single key
+    presses are read without Enter. Otherwise a header is printed once and
+    there is no key input.
     """
 
-    def __init__(self, name: str, remote: str, transport: str):
-        self.name, self.remote, self.transport = name, remote, transport
-        self.mode, self.state, self.detail = "watch", "starting", ""
-        self.pinned = PRETTY and sys.stdout.isatty()
+    HEADER_ROWS = 4
 
-    def line(self, width: int | None = None) -> str:
-        # Most important first; trailing parts are dropped when the terminal is narrow
-        parts = [part for part in (self.state, self.detail, self.transport, "Ctrl+C to stop") if part]
-        fixed = len(f" {self.mode.upper()} ") + 2 + len(f"{self.name} → {self.remote}") + 2
-        while width is not None and len(parts) > 1 and fixed + len(" · ".join(parts)) > width:
-            parts.pop()
-        return format_header(self.mode, self.name, self.remote, " · ".join(parts), width)
+    def __init__(self, name: str, remote: str, transport: str, interactive: bool):
+        self.name, self.remote, self.transport = name, remote, transport
+        self.interactive = interactive
+        self.mode, self.state, self.level, self.detail = "idle", "starting…", "busy", ""
+        self.watching = False
+        self.message, self.message_color = "", "dim"
+        self._typed: deque[str] = deque()
+        self._terminal_settings = None
+
+    # --- the fixed rows
 
     def bar(self, width: int) -> str:
-        """The header as a full-width bar: what is synced on the left, the state on the right."""
-        if self.mode == "offline":
-            dot = BAR_DOT_OFFLINE
-        else:
-            dot = BAR_DOT_IDLE if self.state == IDLE else BAR_DOT_BUSY
-        left = [(f" {self.mode.upper()} ", BAR_BADGE[self.mode]), (f"  {self.name}", "1;97"),
+        """What is synced on the left, the current state on the right."""
+        left = [(f" {BAR_LABEL[self.mode]} ", BAR_BADGE[self.mode]), (f"  {self.name}", "1;97"),
                 (f"  →  {self.remote}", "38;5;250")]
-        right = [("●", dot), (f" {self.state}", "38;5;255")]
+        right = [("●", BAR_DOT[self.level]), (f" {self.state}", "38;5;255")]
         right += [(f"  ·  {part}", "38;5;245") for part in (self.detail, self.transport) if part]
         right.append((" ", ""))
 
-        def length(segments) -> int:
-            return sum(len(text) for text, _ in segments)
-
-        # Too narrow: drop details from the right, then shorten the remote
-        while length(left) + 2 + length(right) > width and len(right) > 3:
+        # Too narrow: drop details from the right, then shorten the remote, then the state
+        while segments_length(left) + 2 + segments_length(right) > width and len(right) > 3:
             right.pop(-2)
-        room = width - length(left[:2]) - 2 - length(right)
+        room = width - segments_length(left[:2]) - 2 - segments_length(right)
         if len(left[2][0]) > room:
             left[2] = (left[2][0][:max(room - 1, 0)] + "…" if room > 0 else "", left[2][1])
-        over = length(left) + length(right) - width
-        if over > 0:  # very narrow: cut the state text rather than wrap
+        over = segments_length(left) + segments_length(right) - width
+        if over > 0:
             right[1] = (right[1][0][:max(len(right[1][0]) - over, 0)], right[1][1])
-        gap = max(width - length(left) - length(right), 0)
+        gap = max(width - segments_length(left) - segments_length(right), 0)
+        return styled(left + [(" " * gap, "")] + right, BAR_BACKGROUND)
 
-        def render(segments) -> str:
-            return "".join(f"\033[0;{BAR_BACKGROUND};{code}m{text}" for text, code in segments)
+    def key_row(self, width: int) -> str:
+        segments = [(" ", "")]
+        for key, label in SESSION_KEYS:
+            if key == "w":
+                label = "watch: on" if self.watching else "watch: off"
+            item = [(f"[{key}]", "1;97"), (f" {label}   ", "38;5;245")]
+            if segments_length(segments) + segments_length(item) > width:
+                break
+            segments += item
+        return styled(segments)
 
-        return f"{render(left)}\033[0;{BAR_BACKGROUND}m{' ' * gap}{render(right)}\033[0m"
+    def message_row(self, width: int) -> str:
+        text = f" {self.message}" if self.message else " no problems"
+        return paint(text[:max(width - 1, 0)], self.message_color if self.message else "dim")
 
     def draw(self, clear: bool = False):
         size = shutil.get_terminal_size()
-        if colors_on():
-            first, second = self.bar(size.columns), ""
-        else:
-            first, second = self.line(size.columns - 1), "─" * (size.columns - 1)
+        rows = [self.bar(size.columns), self.key_row(size.columns), self.message_row(size.columns),
+                paint("─" * (size.columns - 1), "dim")]
+        top = self.HEADER_ROWS + 1
         # Setting the scroll region moves the cursor, so save and restore it
         start = "\033[2J" if clear else "\0337"
-        end = "\033[3;1H" if clear else "\0338"
-        sys.stdout.write(
-            f"{start}\033[3;{size.lines}r"
-            f"\033[1;1H\033[2K{first}"
-            f"\033[2;1H\033[2K{second}{end}"
-        )
+        end = f"\033[{top};1H" if clear else "\0338"
+        fixed = "".join(f"\033[{row};1H\033[2K{text}" for row, text in enumerate(rows, 1))
+        title = f"\033]0;xsync {self.name}: {self.state}\007"
+        sys.stdout.write(f"{start}\033[{top};{size.lines}r{fixed}{end}{title}")
         sys.stdout.flush()
 
-    def set_status(self, state: str, detail: str | None = None, mode: str = "watch"):
-        """Update what the header says xsync is doing; detail is kept when not given."""
-        self.state, self.mode = state, mode
+    def set_status(self, state: str, level: str = "ok", detail: str | None = None, mode: str | None = None):
+        """Say what the session is doing. level is ok, busy or problem."""
+        self.state, self.level = state, level
         if detail is not None:
             self.detail = detail
-        if self.pinned:
+        if mode is not None:
+            self.mode = mode
+        if self.interactive:
             self.draw()
 
+    def set_message(self, text: str, color: str = "magenta"):
+        self.message, self.message_color = text, color
+        if self.interactive:
+            self.draw()
+
+    # --- keys
+
+    def read_key(self, timeout: float) -> str | None:
+        """Wait up to timeout seconds for a key press. Without a terminal, just wait."""
+        if not self.interactive:
+            time.sleep(timeout)
+            return None
+        if not self._typed:
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
+            if not ready:
+                return None
+            chunk = os.read(sys.stdin.fileno(), 4096).decode("utf-8", "ignore")
+            if chunk.startswith("\033") and len(chunk) > 1:
+                return None  # arrow keys and other escape sequences
+            self._typed.extend(chunk)
+        return self._typed.popleft() if self._typed else None
+
+    def ask(self, label: str) -> str | None:
+        """Read a line of text on the message row. Returns None if cancelled with Esc."""
+        previous = (self.message, self.message_color)
+        text = ""
+        while True:
+            self.set_message(f"{label}: {text}▏   Enter to confirm, Esc to cancel", "bold")
+            key = self.read_key(0.5)
+            if key is None:
+                continue
+            if key in "\r\n":
+                break
+            if key == "\033":
+                text = None
+                break
+            if key in ("\x7f", "\b"):
+                text = text[:-1]
+            elif key == "\x15":  # Ctrl+U
+                text = ""
+            elif key.isprintable():
+                text += key
+        self.set_message(*previous)
+        return text
+
+    # --- setup and teardown
+
     def __enter__(self):
-        if not self.pinned:
-            print(self.line(), flush=True)
+        if not self.interactive:
+            print(format_header("watch", self.name, self.remote, self.transport), flush=True)
             return self
+        import termios
+        import tty
+        self._terminal_settings = termios.tcgetattr(sys.stdin.fileno())
+        tty.setcbreak(sys.stdin.fileno())  # single key presses, no echo; Ctrl+C still works
         self.draw(clear=True)
         if hasattr(signal, "SIGWINCH"):
             signal.signal(signal.SIGWINCH, lambda *_: self.draw())
         return self
 
     def __exit__(self, *exc):
-        if self.pinned:
+        if self.interactive:
+            import termios
             if hasattr(signal, "SIGWINCH"):
                 signal.signal(signal.SIGWINCH, signal.SIG_DFL)
-            sys.stdout.write("\0337\033[r\0338")
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._terminal_settings)
+            sys.stdout.write("\0337\033[r\0338\033]0;\007")
             sys.stdout.flush()
         return False
 
@@ -310,6 +404,7 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
     if not PRETTY:
         silence = subprocess.DEVNULL if quiet else None
         return subprocess.run(cmd, stdout=silence, stderr=silence).returncode
+    dry_run = "--dry-run" in cmd
     cmd = [cmd[0], "--out-format=%i %n%L", "--outbuf=L", *cmd[1:]]
     counts = {"new": 0, "updated": 0, "deleted": 0}
     seen_messages = set()
@@ -321,22 +416,25 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
         if kind in counts:
             counts[kind] += 1
             mark, color = CHANGE_MARKS[kind]
-            emit(f"{mark} {text}", color)
+            emit(f"{mark} {text}", color, note="not synced" if dry_run and STAMP else "")
         elif kind == "message" and not quiet and text not in seen_messages:
             if deleting_missing and text.startswith(VANISHED_MESSAGES):
                 continue
             seen_messages.add(text)
-            emit(f"! {text}", "yellow")
+            warn(text)
     rc = proc.wait()
-    CHANGES += sum(counts.values())
+    LAST_COUNTS.update(counts)
+    if not dry_run:
+        CHANGES += sum(counts.values())
     if not STAMP:
-        would = "would be " if "--dry-run" in cmd else ""
+        would = "would be " if dry_run else ""
         changes = ", ".join(f"{n} {would}{kind}" for kind, n in counts.items() if n)
         print(paint(f"{changes or 'Already up to date'} · {time.monotonic() - start:.1f}s", "dim"), flush=True)
     return rc
 
 
-def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, rsync: list[str] = RSYNC) -> int:
+def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool,
+              rsync: list[str] = RSYNC, quiet: bool = False) -> int:
     """Sync entire repo to remote."""
     cmd = [
         rsync[0],
@@ -349,13 +447,42 @@ def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, r
     ]
     if dry_run:
         cmd.insert(1, "--dry-run")
-    return run_rsync(cmd)
+    return run_rsync(cmd, quiet)
 
 
-def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool, rsync: list[str] = RSYNC) -> int:
-    """Sync a single file, preserving its relative path in the remote."""
-    rel = file_path.resolve().relative_to(repo_root)
-    return sync_batch([str(rel)], repo_root, remote, dry_run, rsync)
+def resolve_in_project(text: str, repo_root: Path) -> str | None:
+    """Turn a typed, pasted or dragged path into a path relative to the project root.
+
+    Accepts absolute paths and paths relative to the current directory or the
+    project root. Returns None if it does not exist or lies outside the project.
+    """
+    text = text.strip()
+    try:
+        parts = shlex.split(text)  # undo quotes and backslash-escaped spaces from drag and drop
+    except ValueError:
+        parts = []
+    if len(parts) == 1:
+        text = parts[0]
+    if not text:
+        return None
+    path = Path(os.path.expanduser(text))
+    candidates = [path] if path.is_absolute() else [Path.cwd() / path, repo_root / path]
+    for candidate in candidates:
+        if candidate.exists():
+            try:
+                return str(candidate.resolve().relative_to(repo_root.resolve()))
+            except ValueError:
+                continue
+    return None
+
+
+def sync_path(rel: str, repo_root: Path, remote: str, exclude_file: Path, dry_run: bool,
+              rsync: list[str] = RSYNC) -> int:
+    """Sync one file, or mirror one folder, keeping its relative path on the remote."""
+    if rel == ".":
+        return sync_full(repo_root, remote, exclude_file, dry_run, rsync)
+    mirror = exclude_file if (repo_root / rel).is_dir() else None
+    return sync_batch([rel], repo_root, remote, dry_run, rsync, mirror_excludes=mirror)
 
 
 def inside_remote(rels: list[str]) -> list[str]:
@@ -370,12 +497,14 @@ def inside_remote(rels: list[str]) -> list[str]:
 
 
 def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False,
-               rsync: list[str] = RSYNC, delete_missing: bool = False, quiet: bool = False) -> int:
-    """Sync a batch of relative file paths using rsync --files-from.
+               rsync: list[str] = RSYNC, delete_missing: bool = False, quiet: bool = False,
+               mirror_excludes: Path | None = None) -> int:
+    """Sync a batch of relative paths using rsync --files-from.
 
     --files-from implies --relative, so missing parent directories are created.
     With delete_missing, listed files that no longer exist locally are deleted
-    on the remote.
+    on the remote. With mirror_excludes (an exclude file), listed folders are
+    mirrored like a full sync: sent recursively, with remote extras deleted.
     """
     batch = inside_remote(batch)
     if not batch:
@@ -386,6 +515,7 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
         rsync[0],
         rsync_flags(remote),
         *rsync[1:],  # extra args go after -a so they can override it
+        *(["-r", "--delete", f"--exclude-from={mirror_excludes}"] if mirror_excludes else []),
         "--files-from", str(files_from),
         str(repo_root) + "/",
         remote,
@@ -410,7 +540,7 @@ def is_ssh_remote(remote: str) -> bool:
     return ":" in remote
 
 
-def ssh_reachable(remote: str, rsync: list[str] = RSYNC) -> bool:
+def ssh_reachable(remote: str, rsync: list[str] = RSYNC, quiet: bool = False) -> bool:
     """Check that the SSH host answers without prompting for a password.
 
     Probes through rsync instead of running a remote command, so it also
@@ -420,7 +550,8 @@ def ssh_reachable(remote: str, rsync: list[str] = RSYNC) -> bool:
     # -T: no terminal, even if ~/.ssh/config sets RequestTTY for this host
     ssh = "ssh -T -o BatchMode=yes -o ConnectTimeout=5"
     cmd = [rsync[0], "-e", ssh, "--list-only", f"{host}:."]
-    return subprocess.run(cmd, stdout=subprocess.DEVNULL).returncode == 0
+    errors = subprocess.DEVNULL if quiet else None
+    return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=errors).returncode == 0
 
 
 def normalize_remote(remote: str) -> str:
@@ -524,144 +655,291 @@ def make_excluded_checker(repo_root: Path, patterns: list[str]):
 
 
 RETRY_SECONDS = 10
+HEARTBEAT_SECONDS = 60
 IDLE = "in sync, watching for changes"
 
 
-def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float, rsync: list[str] = RSYNC):
-    try:
-        from watchdog.observers import Observer
-        from watchdog.events import FileSystemEventHandler
-    except ImportError:
-        print("error: watchdog is not installed. Run: pip install watchdog")
-        sys.exit(1)
+def run_session(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float,
+                rsync: list[str] = RSYNC, watch: bool = False, interactive: bool = False):
+    """The session: compare, sync and watch on single key presses.
 
+    Without a terminal there are no keys, and this is plain watch mode.
+    """
+    global STAMP, PROBLEM_HOOK
+    STAMP = True
+    ssh = is_ssh_remote(remote)
+    screen = Screen(repo_root.name, remote, "ssh" if ssh else "local", interactive)
     is_excluded = make_excluded_checker(repo_root, exclude_patterns)
     pending: set[str] = set()
     deleted: set[str] = set()
     lock = threading.Lock()
+    problems: deque[tuple[str, str]] = deque(maxlen=50)
+    observer = None
+    offline = False
+    last_change = ""
+    resting = ("not compared yet", "busy")  # what the bar says when idle and not watching
 
-    class Handler(FileSystemEventHandler):
-        def _handle(self, abs_path: str):
-            if is_excluded(abs_path):
-                return
-            try:
-                rel = str(Path(abs_path).relative_to(repo_root))
-            except ValueError:
-                return
-            with lock:
-                pending.add(rel)
+    def clock() -> str:
+        return f"{datetime.now():%H:%M:%S}"
 
-        def on_modified(self, event):
-            if not event.is_directory:
-                self._handle(event.src_path)
+    def detail() -> str:
+        return f"{CHANGES} changes" + (f" · last {last_change}" if last_change else "")
 
-        def on_created(self, event):
-            if not event.is_directory:
-                self._handle(event.src_path)
+    def rest():
+        """Set the bar to what the session is doing when nothing is running."""
+        if offline:
+            queued = len(pending) + len(deleted)
+            screen.set_status(f"offline, {queued} queued, retrying", "problem", detail(), "offline")
+        elif screen.watching:
+            screen.set_status(IDLE, "ok", detail(), "watch")
+        else:
+            screen.set_status(*resting, detail(), "idle")
 
-        def on_moved(self, event):
-            if not event.is_directory:
-                # src is gone on remote; dest needs to be pushed
-                self._handle(event.dest_path)
-                # Excluded paths are never ours to delete on the remote
+    def record_problem(text: str):
+        problems.append((clock(), text))
+        screen.set_message(f"last problem {clock()}: {text}   [e] shows all")
+
+    def reached(codes: list[int]) -> bool:
+        """Report rsync exit codes. False when the connection failed."""
+        nonlocal offline
+        if any(code in CONNECTION_EXIT_CODES for code in codes):
+            if not offline:
+                offline = True
+                warn(f"connection lost; retrying every {RETRY_SECONDS}s", "magenta")
+            return False
+        if offline:
+            offline = False
+            emit("reconnected", "green")
+        for code in codes:
+            if code != 0:
+                warn(f"rsync exited with code {code}", "magenta")
+        return True
+
+    def full_sync():
+        nonlocal resting, last_change
+        screen.set_status("syncing…", "busy")
+        before = CHANGES
+        rc = sync_full(repo_root, remote, exclude_file, False, rsync, quiet=offline)
+        if reached([rc]):
+            if CHANGES != before:
+                last_change = clock()
+            elif rc == 0:
+                emit("already up to date", "dim")
+            resting = (f"in sync at {clock()[:5]}", "ok") if rc == 0 else (f"sync had errors at {clock()[:5]}", "problem")
+        rest()
+
+    def compare():
+        nonlocal resting
+        screen.set_status("comparing…", "busy")
+        rc = sync_full(repo_root, remote, exclude_file, True, rsync, quiet=offline)
+        if reached([rc]):
+            differences = sum(LAST_COUNTS.values())
+            if differences:
+                emit(f"{differences} difference(s), nothing changed; press s to sync", "dim")
+                resting = (f"{differences} differences at {clock()[:5]}", "busy")
+            elif rc == 0:
+                emit("no differences", "dim")
+                resting = (f"in sync at {clock()[:5]}", "ok")
+        rest()
+
+    def start_watch():
+        nonlocal observer
+        try:
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler
+        except ImportError:
+            if not interactive:
+                print("error: watchdog is not installed. Run: pip install watchdog")
+                sys.exit(1)
+            warn("watch mode needs watchdog, which is not installed (pip install watchdog)", "magenta")
+            return
+
+        class Handler(FileSystemEventHandler):
+            def _handle(self, abs_path: str):
+                if is_excluded(abs_path):
+                    return
+                try:
+                    rel = str(Path(abs_path).relative_to(repo_root))
+                except ValueError:
+                    return
+                with lock:
+                    pending.add(rel)
+
+            def on_modified(self, event):
+                if not event.is_directory:
+                    self._handle(event.src_path)
+
+            def on_created(self, event):
+                if not event.is_directory:
+                    self._handle(event.src_path)
+
+            def on_moved(self, event):
+                if not event.is_directory:
+                    # src is gone on remote; dest needs to be pushed
+                    self._handle(event.dest_path)
+                    # Excluded paths are never ours to delete on the remote
+                    if is_excluded(event.src_path):
+                        return
+                    try:
+                        rel = str(Path(event.src_path).relative_to(repo_root))
+                        with lock:
+                            deleted.add(rel)
+                    except ValueError:
+                        pass
+
+            def on_deleted(self, event):
+                if event.is_directory:
+                    return
                 if is_excluded(event.src_path):
                     return
                 try:
                     rel = str(Path(event.src_path).relative_to(repo_root))
-                    with lock:
-                        deleted.add(rel)
                 except ValueError:
-                    pass
+                    return
+                with lock:
+                    pending.discard(rel)
+                    deleted.add(rel)
 
-        def on_deleted(self, event):
-            if event.is_directory:
-                return
-            if is_excluded(event.src_path):
-                return
-            try:
-                rel = str(Path(event.src_path).relative_to(repo_root))
-            except ValueError:
-                return
+        # Start listening before the full sync, so nothing changed meanwhile is missed
+        observer = Observer()
+        observer.schedule(Handler(), str(repo_root), recursive=True)
+        observer.start()
+        screen.watching = True
+        full_sync()
+
+    def stop_watch():
+        nonlocal observer
+        observer.stop()
+        observer.join()
+        observer = None
+        with lock:
+            pending.clear()
+            deleted.clear()
+        screen.watching = False
+        emit("watch off", "dim")
+        rest()
+
+    def flush():
+        """Send what the watcher collected since the last flush."""
+        nonlocal last_change
+        with lock:
+            batch = list(pending)
+            pending.clear()
+            removals = list(deleted)
+            deleted.clear()
+
+        # Anything "deleted" that still exists was overwritten (atomic write) — sync it
+        overwritten = [f for f in removals if (repo_root / f).exists()]
+        removals = [f for f in removals if not (repo_root / f).exists()]
+        batch = list(set(batch) | set(overwritten))
+
+        # Drop batch entries that no longer exist (temp files from atomic writes)
+        batch = [f for f in batch if (repo_root / f).exists()]
+
+        if not batch and not removals:
+            return
+        if not offline:
+            screen.set_status("syncing…", "busy")
+        before = CHANGES
+        codes = []
+        if removals:
+            if not PRETTY and not offline:
+                emit(f"deleting {len(removals)} file(s): {', '.join(removals)}")
+            codes.append(delete_from_remote(removals, repo_root, remote, rsync, quiet=offline))
+        if batch:
+            if not PRETTY and not offline:
+                emit(f"syncing {len(batch)} file(s): {', '.join(batch)}")
+            codes.append(sync_batch(batch, repo_root, remote, rsync=rsync, quiet=offline))
+        if not reached(codes):
+            # Keep the changes and try again until the connection is back
             with lock:
-                pending.discard(rel)
-                deleted.add(rel)
+                pending.update(batch)
+                deleted.update(removals)
+        elif CHANGES != before:
+            last_change = clock()
+        rest()
 
-    observer = Observer()
-    observer.schedule(Handler(), str(repo_root), recursive=True)
-    observer.start()
+    def sync_one():
+        nonlocal last_change
+        text = screen.ask("file or folder to sync (type, paste or drag it here)")
+        if not text:
+            return
+        rel = resolve_in_project(text, repo_root)
+        if rel is None:
+            warn(f"not found inside the project: {text.strip()}", "magenta")
+            return
+        screen.set_status(f"syncing {rel}…", "busy")
+        before = CHANGES
+        rc = sync_path(rel, repo_root, remote, exclude_file, False, rsync)
+        if reached([rc]):
+            if CHANGES != before:
+                last_change = clock()
+            elif rc == 0:
+                emit(f"{rel}: already up to date", "dim")
+        rest()
+
+    def check_connection(announce: bool):
+        """Probe the host; go offline or come back online accordingly."""
+        if not ssh:
+            if announce:
+                emit("local remote, no connection to check", "dim")
+            return
+        if announce:
+            screen.set_status("connecting…", "busy")
+        was_offline = offline
+        if ssh_reachable(remote, rsync, quiet=True):
+            reached([0])
+            if announce and not was_offline:
+                emit("connection ok", "dim")
+            if was_offline and screen.watching:
+                flush()
+        else:
+            reached([255])
+        rest()
+
+    def show_problems():
+        if not problems:
+            emit("no problems recorded", "dim")
+        for when, text in problems:
+            emit(f"! {when}  {text}", "yellow")
+        problems.clear()
+        screen.set_message("")
+
+    actions = {"s": full_sync, "c": compare, "f": sync_one, "e": show_problems,
+               "r": lambda: check_connection(announce=True),
+               "w": lambda: stop_watch() if screen.watching else start_watch()}
 
     exclude_file = write_exclude_file(repo_root, exclude_patterns)
-
-    global STAMP
-    STAMP = True
-    header = PinnedHeader(repo_root.name, remote, "ssh" if is_ssh_remote(remote) else "local")
-    offline = False
+    PROBLEM_HOOK = record_problem
     try:
-        with header:
-            header.set_status("initial sync…")
-            rc = sync_full(repo_root, remote, exclude_file, dry_run=False, rsync=rsync)
-            if rc != 0:
-                emit(f"! initial sync failed: rsync exited with code {rc}", "magenta")
-            elif not header.pinned:
-                emit(IDLE, "dim")
-            header.set_status(IDLE if rc == 0 else f"initial sync failed, {IDLE}", f"{CHANGES} changes")
-
+        with screen:
+            if watch:
+                start_watch()
+            else:
+                compare()
+            last_flush = last_beat = time.monotonic()
             while True:
-                time.sleep(RETRY_SECONDS if offline else debounce)
-                with lock:
-                    batch = list(pending)
-                    pending.clear()
-                    removals = list(deleted)
-                    deleted.clear()
-
-                # Anything "deleted" that still exists was overwritten (atomic write) — sync it
-                overwritten = [f for f in removals if (repo_root / f).exists()]
-                removals = [f for f in removals if not (repo_root / f).exists()]
-                batch = list(set(batch) | set(overwritten))
-
-                # Drop batch entries that no longer exist (temp files from atomic writes)
-                batch = [f for f in batch if (repo_root / f).exists()]
-
-                if not batch and not removals:
-                    continue
-
-                if not offline:
-                    header.set_status("syncing…")
-                codes = []
-                if removals:
-                    if not PRETTY and not offline:
-                        emit(f"deleting {len(removals)} file(s): {', '.join(removals)}")
-                    codes.append(delete_from_remote(removals, repo_root, remote, rsync, quiet=offline))
-                if batch:
-                    if not PRETTY and not offline:
-                        emit(f"syncing {len(batch)} file(s): {', '.join(batch)}")
-                    codes.append(sync_batch(batch, repo_root, remote, rsync=rsync, quiet=offline))
-
-                if any(code in CONNECTION_EXIT_CODES for code in codes):
-                    # Keep the changes and try again until the connection is back
-                    with lock:
-                        pending.update(batch)
-                        deleted.update(removals)
-                    if not offline:
-                        offline = True
-                        emit(f"! connection lost; changes are queued and retried every {RETRY_SECONDS}s", "magenta")
-                    header.set_status(f"offline, {len(batch) + len(removals)} queued, retrying", mode="offline")
-                    continue
-
-                if offline:
-                    offline = False
-                    emit("reconnected; queued changes sent", "green")
-                failed = [code for code in codes if code != 0]
-                for code in failed:
-                    emit(f"! rsync exited with code {code}", "magenta")
-                header.set_status(f"last sync had errors, {IDLE}" if failed else IDLE,
-                                  f"{CHANGES} changes · last {datetime.now():%H:%M:%S}")
+                key = screen.read_key(0.2 if interactive else debounce)
+                if key == "q":
+                    break
+                if key in actions:
+                    actions[key]()
+                now = time.monotonic()
+                if screen.watching and now - last_flush >= (RETRY_SECONDS if offline else debounce) - 0.05:
+                    last_flush = now
+                    flush()
+                # Notice a dropped connection without waiting for the next change
+                if interactive and now - last_beat >= (RETRY_SECONDS if offline else HEARTBEAT_SECONDS):
+                    last_beat = now
+                    check_connection(announce=False)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        observer.stop()
+        PROBLEM_HOOK = None
+        if observer is not None:
+            observer.stop()
+            observer.join()
         exclude_file.unlink(missing_ok=True)
-    observer.join()
 
 
 def cmd_status(repo_root: Path, config: dict, remote: str, rsync: list[str], version: str) -> int:
@@ -718,7 +996,7 @@ def parse_flag_value(args: list[str], flag: str, default):
     return default
 
 
-KNOWN_FLAGS = {"--init", "--dry-run", "--watch", "--interval", "--status", "--verbose", "--version", "--help", "-h"}
+KNOWN_FLAGS = {"--init", "--sync", "--dry-run", "--watch", "--interval", "--status", "--verbose", "--version", "--help", "-h"}
 
 
 def main():
@@ -802,27 +1080,27 @@ def main():
         print(f"   Try: rsync --list-only {host}:.")
         sys.exit(1)
 
-    if watch:
-        raw_interval = parse_flag_value(args, "--interval", None)
-        debounce = float(raw_interval) if raw_interval is not None else 2.0
-        cmd_watch(repo_root, remote, exclude_patterns, debounce, rsync)
+    # In a terminal, plain `xsync` and `xsync --watch` open the session
+    interactive = PRETTY and sys.stdin.isatty() and sys.stdout.isatty()
+    if watch or (interactive and not file_arg and not dry_run and "--sync" not in args):
+        debounce = float(interval_value) if interval_value is not None else 2.0
+        run_session(repo_root, remote, exclude_patterns, debounce, rsync, watch=watch, interactive=interactive)
         return
 
     transport = "ssh" if is_ssh_remote(remote) else "local"
-
+    rel = "."
     if file_arg:
-        file_path = Path(file_arg)
-        try:
-            file_path.resolve().relative_to(repo_root)
-        except ValueError:
-            print(f"error: file is outside the project: {file_path}")
+        rel = resolve_in_project(file_arg, repo_root)
+        if rel is None:
+            print(f"error: not found inside the project: {file_arg}")
             sys.exit(1)
-        print(format_header("dry-run" if dry_run else "file", repo_root.name, remote, transport), flush=True)
-        rc = sync_file(file_path, repo_root, remote, dry_run, rsync)
-    else:
-        exclude_file = write_exclude_file(repo_root, exclude_patterns)
-        print(format_header("dry-run" if dry_run else "sync", repo_root.name, remote, transport), flush=True)
-        rc = sync_full(repo_root, remote, exclude_file, dry_run, rsync)
+
+    mode = "dry-run" if dry_run else ("file" if file_arg else "sync")
+    exclude_file = write_exclude_file(repo_root, exclude_patterns)
+    print(format_header(mode, repo_root.name, remote, transport), flush=True)
+    try:
+        rc = sync_path(rel, repo_root, remote, exclude_file, dry_run, rsync)
+    finally:
         exclude_file.unlink(missing_ok=True)
 
     if rc != 0:

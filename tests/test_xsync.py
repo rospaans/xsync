@@ -332,14 +332,52 @@ def test_format_header_fits_width(width):
 
 
 @pytest.mark.parametrize("width", [25, 40, 80, 120, 200])
-def test_watch_bar_never_exceeds_terminal_width(width):
+def test_session_rows_never_exceed_terminal_width(width):
     import re
-    header = xsync.PinnedHeader("a_project", "host:some/long/remote/folder/", "ssh")
-    for state, mode in [(xsync.IDLE, "watch"), ("syncing…", "watch"), ("offline, 3 queued, retrying", "offline")]:
-        header.state, header.detail, header.mode = state, "28 changes · last 15:44:16", mode
-        visible = re.sub(r"\033\[[0-9;]*m", "", header.bar(width))
-        assert len(visible) <= width
-        assert visible.startswith(f" {mode.upper()} ")
+    screen = xsync.Screen("a_project", "host:some/long/remote/folder/", "ssh", interactive=False)
+    states = [("watch", xsync.IDLE, "ok", "WATCH"), ("idle", "3 differences at 15:44", "busy", "XSYNC"),
+              ("offline", "offline, 3 queued, retrying", "problem", "OFFLINE")]
+    for mode, state, level, label in states:
+        screen.mode, screen.state, screen.level, screen.detail = mode, state, level, "28 changes · last 15:44:16"
+        bar = re.sub(r"\033\[[0-9;]*m", "", screen.bar(width))
+        assert len(bar) <= width
+        assert bar.startswith(f" {label} ")
+    screen.message = "last problem 15:44:16: " + "x" * 300
+    for row in (screen.key_row(width), screen.message_row(width)):
+        assert len(re.sub(r"\033\[[0-9;]*m", "", row)) <= width
+
+
+def test_key_row_lists_every_key_and_the_watch_state():
+    screen = xsync.Screen("p", "host:x/", "ssh", interactive=False)
+    row = screen.key_row(200)
+    for key, _ in xsync.SESSION_KEYS:
+        assert f"[{key}]" in row
+    assert "watch: off" in row
+    screen.watching = True
+    assert "watch: on" in screen.key_row(200)
+
+
+def test_resolve_in_project(tmp_path, monkeypatch):
+    root = tmp_path.resolve() / "proj"
+    (root / "sub dir").mkdir(parents=True)
+    (root / "sub dir" / "a file.py").write_text("x")
+    (root / "top.py").write_text("x")
+    outside = tmp_path.resolve() / "outside.txt"
+    outside.write_text("x")
+    monkeypatch.chdir(root / "sub dir")
+
+    assert xsync.resolve_in_project("top.py", root) == "top.py"                      # relative to the root
+    assert xsync.resolve_in_project("a file.py", root) == "sub dir/a file.py"        # relative to the cwd
+    assert xsync.resolve_in_project(str(root / "top.py"), root) == "top.py"          # absolute
+    assert xsync.resolve_in_project(f"'{root}/sub dir/a file.py'  ", root) == "sub dir/a file.py"  # quoted paste
+    dragged = str(root / "sub dir" / "a file.py").replace(" ", "\\ ")
+    assert xsync.resolve_in_project(dragged, root) == "sub dir/a file.py"            # dragged from Finder
+    assert xsync.resolve_in_project("sub dir", root) == "sub dir"                    # a folder
+    assert xsync.resolve_in_project(str(root), root) == "."
+    assert xsync.resolve_in_project("missing.py", root) is None
+    assert xsync.resolve_in_project(str(outside), root) is None
+    assert xsync.resolve_in_project("../../outside.txt", root) is None
+    assert xsync.resolve_in_project("   ", root) is None
 
 
 def test_missing_parent_dirs(tmp_path):
@@ -461,6 +499,46 @@ def test_starter_config_is_valid_toml():
     assert config["remote"] == "myhost:/path/to/project/"
     assert set(config) == {"remote", "exclude"}
     assert ".xsync.files" in config["exclude"]
+
+
+@needs_rsync
+def test_sync_flag_syncs_once(project):
+    src, dst = project
+    result = run_xsync(src, "--sync")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tree(dst) == {"a.txt", "sub/b.txt"}
+
+
+@needs_rsync
+def test_folder_sync_mirrors_only_that_folder(project):
+    src, dst = project
+    (src / "sub" / "deeper").mkdir()
+    (src / "sub" / "deeper" / "c.txt").write_text("c")
+    (src / "sub" / "ignored").mkdir()
+    (src / "sub" / "ignored" / "skip.txt").write_text("s")
+    (dst / "sub").mkdir()
+    (dst / "sub" / "stale.txt").write_text("old")
+    (dst / "elsewhere.txt").write_text("keep")
+
+    preview = run_xsync(src, "sub", "--dry-run")
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert tree(dst) == {"sub/stale.txt", "elsewhere.txt"}
+
+    result = run_xsync(src, "sub")
+    assert result.returncode == 0, result.stdout + result.stderr
+    # sub/ is mirrored (stale file gone, excludes respected); nothing outside it is touched
+    assert tree(dst) == {"sub/b.txt", "sub/deeper/c.txt", "elsewhere.txt"}
+
+
+@needs_rsync
+def test_path_outside_project_is_rejected(project, tmp_path):
+    src, dst = project
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x")
+    result = run_xsync(src, str(outside))
+    assert result.returncode == 1
+    assert "not found inside the project" in result.stdout
+    assert tree(dst) == set()
 
 
 @needs_rsync
