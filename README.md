@@ -366,8 +366,9 @@ Running `xsync` in a terminal opens a session. It first compares the project wit
 
 ```
  XSYNC   my_project  →  myhost:/data/projects/you/my_project/              ● 3 differences at 15:52  ·  0 changes  ·  ssh
- [s] sync   [w] watch: off   [c] compare   [f] file or folder   [r] reconnect   [e] errors   [q] quit
- no problems
+
+  s  Sync    w  Watch off    c  Compare    f  Path    r  Reconnect    e  Errors    q  Quit
+
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 15:52:10  ~ src/model.py  (not synced)
 15:52:10  + notes/plan.md  (not synced)
@@ -375,7 +376,7 @@ Running `xsync` in a terminal opens a session. It first compares the project wit
 15:52:10  3 difference(s), nothing changed; press s to sync
 ```
 
-The top four lines stay fixed; changes scroll below them.
+The top of the screen stays fixed; changes scroll below it. Each key is drawn as a button. The `w` button turns green while watch mode is on, and the `r` button turns magenta when the connection is lost.
 
 | Key | Action |
 |---|---|
@@ -388,7 +389,7 @@ The top four lines stay fixed; changes scroll below them.
 | `q` | Quit. Ctrl+C works too. |
 
 - **The bar** shows the mode (`XSYNC` when idle, `WATCH`, or `OFFLINE`), what is synced where, and on the right the current state behind a dot: green when in sync, yellow when busy or when there are differences, magenta for problems.
-- **The problem line** keeps the most recent warning or error in view until you press `e`.
+- **The line under the buttons** is empty when all is well. It shows the most recent warning or error until you press `e`, and the input prompt after `f`.
 - **The terminal tab title** shows the state too, so you can see it when the terminal is in the background.
 - **If the connection drops**, the session keeps running. It checks the server once a minute even when nothing changes; when offline, the bar says so, changes made in watch mode are queued, and xsync retries every 10 seconds.
 - **In watch mode**, deleted files are removed from the remote. A folder that disappears locally is removed too, but only once it is empty on the remote, so files that exist only on the server are never touched.

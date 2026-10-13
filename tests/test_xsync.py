@@ -352,9 +352,9 @@ def test_key_row_lists_every_key_and_the_watch_state():
     row = screen.key_row(200)
     for key, _ in xsync.SESSION_KEYS:
         assert f"[{key}]" in row
-    assert "watch: off" in row
+    assert "Watch off" in row
     screen.watching = True
-    assert "watch: on" in screen.key_row(200)
+    assert "Watch on" in screen.key_row(200)
 
 
 def test_resolve_in_project(tmp_path, monkeypatch):

@@ -188,8 +188,11 @@ BAR_BACKGROUND = "48;5;236"
 BAR_BADGE = {"watch": "1;38;5;16;48;5;78", "idle": "1;38;5;16;48;5;75", "offline": "1;38;5;16;48;5;176"}
 BAR_LABEL = {"watch": "WATCH", "idle": "XSYNC", "offline": "OFFLINE"}
 BAR_DOT = {"ok": "38;5;78", "busy": "38;5;221", "problem": "38;5;176"}
-SESSION_KEYS = [("s", "sync"), ("w", "watch"), ("c", "compare"), ("f", "file or folder"),
-                ("r", "reconnect"), ("e", "errors"), ("q", "quit")]
+SESSION_KEYS = [("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("f", "Path"),
+                ("r", "Reconnect"), ("e", "Errors"), ("q", "Quit")]
+# Buttons: a light key cap next to a darker label; the cap is colored to show state
+BUTTON_CAP, BUTTON_CAP_ON, BUTTON_CAP_ALERT = "1;38;5;16;48;5;252", "1;38;5;16;48;5;78", "1;38;5;16;48;5;176"
+BUTTON_LABEL = "38;5;255;48;5;238"
 
 
 def styled(segments: list[tuple[str, str]], background: str = "") -> str:
@@ -216,7 +219,7 @@ class Screen:
     there is no key input.
     """
 
-    HEADER_ROWS = 4
+    HEADER_ROWS = 5
 
     def __init__(self, name: str, remote: str, transport: str, interactive: bool):
         self.name, self.remote, self.transport = name, remote, transport
@@ -250,23 +253,32 @@ class Screen:
         return styled(left + [(" " * gap, "")] + right, BAR_BACKGROUND)
 
     def key_row(self, width: int) -> str:
+        """The keys as a row of buttons."""
+        plain = not colors_on()
         segments = [(" ", "")]
         for key, label in SESSION_KEYS:
+            cap = BUTTON_CAP
             if key == "w":
-                label = "watch: on" if self.watching else "watch: off"
-            item = [(f"[{key}]", "1;97"), (f" {label}   ", "38;5;245")]
+                label = "Watch on" if self.watching else "Watch off"
+                cap = BUTTON_CAP_ON if self.watching else BUTTON_CAP
+            elif key == "r" and self.mode == "offline":
+                cap = BUTTON_CAP_ALERT
+            if plain:
+                item = [(f"[{key}] {label}", ""), ("   ", "")]
+            else:
+                item = [(f" {key} ", cap), (f" {label} ", BUTTON_LABEL), ("  ", "")]
             if segments_length(segments) + segments_length(item) > width:
                 break
             segments += item
         return styled(segments)
 
     def message_row(self, width: int) -> str:
-        text = f" {self.message}" if self.message else " no problems"
-        return paint(text[:max(width - 1, 0)], self.message_color if self.message else "dim")
+        """The latest problem or the input prompt; empty when there is nothing to say."""
+        return paint(f" {self.message}"[:max(width - 1, 0)], self.message_color) if self.message else ""
 
     def draw(self, clear: bool = False):
         size = shutil.get_terminal_size()
-        rows = [self.bar(size.columns), self.key_row(size.columns), self.message_row(size.columns),
+        rows = [self.bar(size.columns), "", self.key_row(size.columns), self.message_row(size.columns),
                 paint("─" * (size.columns - 1), "dim")]
         top = self.HEADER_ROWS + 1
         # Setting the scroll region moves the cursor, so save and restore it
