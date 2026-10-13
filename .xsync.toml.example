@@ -9,6 +9,10 @@ remote = "myhost:/path/to/project/"
 # rsync binary to use (default: /opt/homebrew/bin/rsync if present, else rsync from PATH)
 # rsync = "/opt/homebrew/bin/rsync"
 
+# Extra rsync flags, e.g. when the remote directory is a network share that
+# rejects permission, ownership or timestamp changes
+# rsync_args = ["--no-perms", "--no-owner", "--no-group", "--omit-dir-times", "--inplace"]
+
 # Patterns to exclude from sync (rsync exclude-from syntax)
 exclude = [
     ".git/",

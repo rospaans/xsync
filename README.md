@@ -16,6 +16,7 @@ SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now t
 - **Compression only over SSH**: `-z` is dropped for local and mounted paths.
 - **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) is reported within 5 seconds, before any sync and before `--watch` starts.
 - **rsync flavor**: new optional `rsync = "/path/to/rsync"` key. Defaults to `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`. A one-line warning is printed if it is not GNU rsync 3.x (recent macOS ships openrsync).
+- **Extra rsync flags**: new optional `rsync_args = [...]` key, for remotes on storage that rejects permission, ownership or timestamp changes.
 - **Tests**: `python -m pytest tests`.
 
 ## What it does
@@ -70,6 +71,10 @@ remote = "myhost:/path/to/project/"
 # rsync binary to use (default: /opt/homebrew/bin/rsync if present, else rsync from PATH)
 # rsync = "/opt/homebrew/bin/rsync"
 
+# Extra rsync flags, e.g. when the remote directory is a network share that
+# rejects permission, ownership or timestamp changes
+# rsync_args = ["--no-perms", "--no-owner", "--no-group", "--omit-dir-times", "--inplace"]
+
 # Patterns to exclude (rsync exclude-from syntax)
 exclude = [
     ".git/",
@@ -118,7 +123,7 @@ The `remote` path is empty, `/`, or a home directory. Point it at a dedicated pr
 The file path passed to `xsync` is not inside the project root. `xsync` only syncs files within the project.
 
 **Exit code 23 from rsync**
-Some files could not be transferred (permissions, vanished files). The rest of the sync completed. Usually safe to ignore.
+Some files could not be transferred (permissions, vanished files). If the errors say "Operation not permitted" for `mkstemp` or "failed to set times", the remote directory is probably a network share: set `rsync_args` as shown in the configuration example.
 
 ## License
 

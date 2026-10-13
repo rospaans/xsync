@@ -41,6 +41,10 @@ remote = "myhost:/path/to/project/"
 # rsync binary to use (default: /opt/homebrew/bin/rsync if present, else rsync from PATH)
 # rsync = "/opt/homebrew/bin/rsync"
 
+# Extra rsync flags, e.g. when the remote directory is a network share that
+# rejects permission, ownership or timestamp changes
+# rsync_args = ["--no-perms", "--no-owner", "--no-group", "--omit-dir-times", "--inplace"]
+
 # Patterns to exclude from sync (rsync exclude-from syntax)
 exclude = [
     ".git/",
@@ -81,6 +85,8 @@ def write_exclude_file(repo_root: Path, patterns: list[str]) -> Path:
 
 
 HOMEBREW_RSYNC = "/opt/homebrew/bin/rsync"
+# Default rsync command prefix: binary plus any extra args from the config
+RSYNC = ["rsync"]
 
 
 def resolve_rsync(config: dict) -> str:
@@ -103,10 +109,10 @@ def rsync_flags(remote: str) -> str:
     return "-avz" if is_ssh_remote(remote) else "-av"
 
 
-def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, rsync: str = "rsync") -> int:
+def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, rsync: list[str] = RSYNC) -> int:
     """Sync entire repo to remote."""
     cmd = [
-        rsync,
+        *rsync,
         rsync_flags(remote),
         "--delete",
         f"--exclude-from={exclude_file}",
@@ -118,13 +124,13 @@ def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, r
     return subprocess.run(cmd).returncode
 
 
-def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool, rsync: str = "rsync") -> int:
+def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool, rsync: list[str] = RSYNC) -> int:
     """Sync a single file, preserving its relative path in the remote."""
     rel = file_path.resolve().relative_to(repo_root)
     return sync_batch([str(rel)], repo_root, remote, dry_run, rsync)
 
 
-def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False, rsync: str = "rsync") -> int:
+def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False, rsync: list[str] = RSYNC) -> int:
     """Sync a batch of relative file paths using rsync --files-from.
 
     --files-from implies --relative, so missing parent directories are created.
@@ -132,7 +138,7 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     files_from = repo_root / ".xsync.files"
     files_from.write_text("\n".join(batch) + "\n")
     cmd = [
-        rsync,
+        *rsync,
         rsync_flags(remote),
         "--files-from", str(files_from),
         str(repo_root) + "/",
@@ -235,7 +241,7 @@ def make_excluded_checker(repo_root: Path, patterns: list[str]):
     return is_excluded
 
 
-def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float, rsync: str = "rsync"):
+def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float, rsync: list[str] = RSYNC):
     try:
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
@@ -404,6 +410,7 @@ def main():
         sys.exit(1)
     if not is_gnu_rsync3(version):
         print(f"⚠️  {rsync} is not GNU rsync 3.x; some flags may behave differently (brew install rsync).")
+    rsync = [rsync, *config.get("rsync_args", [])]
 
     # Full syncs (including the initial one in watch mode) run rsync --delete
     if watch or not file_arg:

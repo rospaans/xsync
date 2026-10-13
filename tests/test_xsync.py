@@ -196,9 +196,9 @@ def run_xsync(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def write_config(src: Path, remote: str):
+def write_config(src: Path, remote: str, extra: str = ""):
     (src / ".xsync.toml").write_text(
-        f"remote = {json.dumps(remote)}\nexclude = {json.dumps(EXCLUDES)}\n"
+        f"remote = {json.dumps(remote)}\nexclude = {json.dumps(EXCLUDES)}\n{extra}"
     )
 
 
@@ -227,6 +227,15 @@ def test_full_sync(project):
     result = run_xsync(src)
     assert result.returncode == 0, result.stdout + result.stderr
     assert tree(dst) == {"a.txt", "sub/b.txt"}
+
+
+@needs_rsync
+def test_rsync_args_are_passed_through(project):
+    src, dst = project
+    write_config(src, str(dst) + "/", 'rsync_args = ["--exclude=a.txt"]\n')
+    result = run_xsync(src)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tree(dst) == {"sub/b.txt"}
 
 
 @needs_rsync
