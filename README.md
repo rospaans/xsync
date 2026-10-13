@@ -364,7 +364,7 @@ The first line always says which mode is running, what is synced where, and how:
 xsync sync     my_project → myhost:/data/projects/you/my_project/  ssh
 xsync dry-run  my_project → myhost:/data/projects/you/my_project/  ssh
 xsync file     my_project → myhost:/data/projects/you/my_project/  ssh
-xsync watch    my_project → myhost:/data/projects/you/my_project/  ssh · 12 changes · last 15:26:52 · Ctrl+C to stop
+xsync watch    my_project → myhost:/data/projects/you/my_project/  in sync, watching for changes · 12 changes · last 15:26:52 · ssh
 ```
 
 In a terminal the mode is shown as a colored badge. Below the header, each change is one line:
@@ -390,20 +390,21 @@ The last line is a summary, or "Already up to date". With `--dry-run` it says "w
 
 ### Watch mode
 
-`xsync --watch` does one full sync and then sends changes as you make them. The header stays fixed at the top of the terminal and shows a running count and the time of the last change. Each change appears below it with the time:
+`xsync --watch` does one full sync and then sends changes as you make them. The header stays fixed at the top of the terminal and always says what xsync is doing: `in sync, watching for changes` when idle, `syncing…` during a batch, or `offline` when the server cannot be reached. It also shows a running count and the time of the last change. Each change appears below it with the time:
 
 ```
- WATCH   my_project → myhost:/data/projects/you/my_project/  ssh · 4 changes · last 15:26:41 · Ctrl+C to stop
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────
-15:10:08  in sync, watching for changes
+ WATCH   my_project → myhost:/data/projects/you/my_project/  in sync, watching for changes · 4 changes · last 15:26:41 · ssh
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 15:26:27  + notes/draft.md
 15:26:31  ~ src/model.py
 15:26:41  - notes/draft.md
 15:26:41  - notes/
 ```
 
+On a narrow terminal the header drops details from the right, keeping the state.
+
 - **Deleted files** are removed from the remote. A folder that disappears locally is removed too, but only once it is empty on the remote, so files that exist only on the server are never touched.
-- **If the connection drops**, xsync keeps running. Changes are queued, the header switches to `OFFLINE` with the number of queued changes, and xsync retries every 10 seconds. When the connection is back the queued changes are sent. A dead connection is noticed within about a minute.
+- **If the connection drops**, xsync keeps running. Changes are queued, the header switches to `OFFLINE` and shows how many changes are queued, and xsync retries every 10 seconds. When the connection is back the queued changes are sent. A dead connection is noticed within about a minute.
 
 ### Checking the setup
 

@@ -118,7 +118,8 @@ STAMP = False
 CHANGES = 0
 
 COLORS = {
-    "green": "32", "blue": "34", "red": "31", "yellow": "33", "magenta": "35", "dim": "2", "bold": "1",
+    # 256-color blue and red: the basic ones are too dark on dark terminal themes
+    "green": "32", "blue": "38;5;75", "red": "38;5;203", "yellow": "33", "magenta": "35", "dim": "2", "bold": "1",
     # header badges, one per mode
     "sync": "1;7;34", "dry-run": "1;7;33", "file": "1;7;36", "watch": "1;7;32", "offline": "1;7;35", "status": "1;7",
 }
@@ -173,12 +174,16 @@ class PinnedHeader:
 
     def __init__(self, name: str, remote: str, transport: str):
         self.name, self.remote, self.transport = name, remote, transport
-        self.mode, self.status = "watch", ""
+        self.mode, self.state, self.detail = "watch", "starting", ""
         self.pinned = PRETTY and sys.stdout.isatty()
 
     def line(self, width: int | None = None) -> str:
-        info = " · ".join(part for part in (self.transport, self.status, "Ctrl+C to stop") if part)
-        return format_header(self.mode, self.name, self.remote, info, width)
+        # Most important first; trailing parts are dropped when the terminal is narrow
+        parts = [part for part in (self.state, self.detail, self.transport, "Ctrl+C to stop") if part]
+        fixed = len(f" {self.mode.upper()} ") + 2 + len(f"{self.name} → {self.remote}") + 2
+        while width is not None and len(parts) > 1 and fixed + len(" · ".join(parts)) > width:
+            parts.pop()
+        return format_header(self.mode, self.name, self.remote, " · ".join(parts), width)
 
     def draw(self, clear: bool = False):
         size = shutil.get_terminal_size()
@@ -193,8 +198,11 @@ class PinnedHeader:
         )
         sys.stdout.flush()
 
-    def set_status(self, status: str, mode: str = "watch"):
-        self.status, self.mode = status, mode
+    def set_status(self, state: str, detail: str | None = None, mode: str = "watch"):
+        """Update what the header says xsync is doing; detail is kept when not given."""
+        self.state, self.mode = state, mode
+        if detail is not None:
+            self.detail = detail
         if self.pinned:
             self.draw()
 
@@ -476,6 +484,7 @@ def make_excluded_checker(repo_root: Path, patterns: list[str]):
 
 
 RETRY_SECONDS = 10
+IDLE = "in sync, watching for changes"
 
 
 def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounce: float, rsync: list[str] = RSYNC):
@@ -546,17 +555,16 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
     global STAMP
     STAMP = True
     header = PinnedHeader(repo_root.name, remote, "ssh" if is_ssh_remote(remote) else "local")
-    total = 0
     offline = False
     try:
         with header:
+            header.set_status("initial sync…")
             rc = sync_full(repo_root, remote, exclude_file, dry_run=False, rsync=rsync)
             if rc != 0:
                 emit(f"! initial sync failed: rsync exited with code {rc}", "magenta")
-            else:
-                emit("in sync, watching for changes", "dim")
-            total = CHANGES
-            header.set_status(f"{total} changes · last {datetime.now():%H:%M:%S}")
+            elif not header.pinned:
+                emit(IDLE, "dim")
+            header.set_status(IDLE if rc == 0 else f"initial sync failed, {IDLE}", f"{CHANGES} changes")
 
             while True:
                 time.sleep(RETRY_SECONDS if offline else debounce)
@@ -577,6 +585,8 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
                 if not batch and not removals:
                     continue
 
+                if not offline:
+                    header.set_status("syncing…")
                 codes = []
                 if removals:
                     if not PRETTY and not offline:
@@ -595,17 +605,17 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
                     if not offline:
                         offline = True
                         emit(f"! connection lost; changes are queued and retried every {RETRY_SECONDS}s", "magenta")
-                    header.set_status(f"{len(batch) + len(removals)} queued", "offline")
+                    header.set_status(f"offline, {len(batch) + len(removals)} queued, retrying", mode="offline")
                     continue
 
                 if offline:
                     offline = False
                     emit("reconnected; queued changes sent", "green")
-                for code in codes:
-                    if code != 0:
-                        emit(f"! rsync exited with code {code}", "magenta")
-                total = CHANGES
-                header.set_status(f"{total} changes · last {datetime.now():%H:%M:%S}")
+                failed = [code for code in codes if code != 0]
+                for code in failed:
+                    emit(f"! rsync exited with code {code}", "magenta")
+                header.set_status(f"last sync had errors, {IDLE}" if failed else IDLE,
+                                  f"{CHANGES} changes · last {datetime.now():%H:%M:%S}")
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
