@@ -18,6 +18,7 @@ SSH remotes (`host:/path/`, with `host` an alias from `~/.ssh/config`) are now t
 - **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) is reported within 5 seconds, before any sync and before `--watch` starts.
 - **rsync flavor**: xsync uses `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`, and prints a one-line warning if it is not GNU rsync 3.x (recent macOS ships openrsync). An optional `rsync = "/path/to/rsync"` key overrides the choice (see Troubleshooting).
 - **Extra rsync flags**: new optional `rsync_args = [...]` key, for example for server folders on storage that rejects permission, ownership or timestamp changes (see "Remotes on a network share").
+- **Readable output**: one line per new, updated or deleted file and a short summary, instead of rsync's raw output (`--verbose` brings that back).
 - **Tests**: `python -m pytest tests`.
 
 ## What it does
@@ -341,10 +342,32 @@ xsync --dry-run            # show what would sync, no transfer
 xsync file.py --dry-run    # dry-run single-file mode
 xsync --watch              # watch for changes and sync automatically
 xsync --watch --interval 5 # watch with a 5-second debounce window
+xsync --verbose            # show rsync's raw output instead of the summary
 xsync --help               # show usage
 ```
 
 An unknown option is an error; xsync never falls back to a sync on a typo.
+
+### Reading the output
+
+```
+[10:45:32] Syncing my_project → myhost:/data/projects/you/my_project/
+  + src/new_module.py
+  ~ README.md
+  - old/unused.py
+  ! rsync: [generator] failed to set times on "...": Operation not permitted (1)
+  1 new, 1 updated, 1 deleted (0.8s)
+[10:45:33] ✅ Done.
+```
+
+| Mark | Meaning |
+|---|---|
+| `+` | New on the remote. |
+| `~` | Updated on the remote. |
+| `-` | Deleted from the remote. |
+| `!` | A message or error from rsync or SSH, shown as received. |
+
+With `--dry-run` the same lines show what would happen, and the summary says "would be". Colors are used in a terminal and left out when the output is piped or `NO_COLOR` is set. This summary needs GNU rsync 3.x; with another rsync, or with `--verbose`, you get rsync's own output.
 
 `xsync` walks up from the current directory to find `.xsync.toml`, so you can run it from any subdirectory of the project.
 
@@ -383,6 +406,9 @@ The `remote` path is empty, `/`, or a home directory. Point it at a dedicated pr
 
 **File is outside repo**
 The file path passed to `xsync` is not inside the project root. `xsync` only syncs files within the project.
+
+**I need to see exactly what rsync did**
+Run the same command with `--verbose` to get rsync's raw output.
 
 **Exit code 23 from rsync**
 Some files or attributes could not be transferred. If the errors say "Operation not permitted", see "Remotes on a network share".

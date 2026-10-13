@@ -257,6 +257,53 @@ def test_resolve_rsync_prefers_config():
     assert xsync.resolve_rsync({"rsync": "/custom/rsync"}) == "/custom/rsync"
 
 
+# --- output formatting ------------------------------------------------------
+
+@pytest.mark.parametrize("line, expected", [
+    ("<f+++++++++ src/new.py", ("new", "src/new.py")),
+    ("cd+++++++++ src/pkg/", ("new", "src/pkg/")),
+    ("<f.st...... README.md", ("updated", "README.md")),
+    ("<fc........ same size.txt", ("updated", "same size.txt")),
+    ("*deleting   old/file.py", ("deleted", "old/file.py")),
+    (".d..t...... ./", ("skip", "./")),
+    (".f...p..... a.txt", ("skip", "a.txt")),
+    ("", ("skip", "")),
+    ("rsync: [generator] failed to set times on \"/x\": Operation not permitted (1)",
+     ("message", "rsync: [generator] failed to set times on \"/x\": Operation not permitted (1)")),
+    ("cannot delete non-empty directory: pkg/src", ("message", "cannot delete non-empty directory: pkg/src")),
+])
+def test_parse_change(line, expected):
+    assert xsync.parse_change(line) == expected
+
+
+@needs_gnu_rsync
+def test_summary_output(project):
+    src, dst = project
+    first = run_xsync(src, "--dry-run")
+    assert "  + a.txt" in first.stdout and "would be new" in first.stdout
+    assert tree(dst) == set()
+
+    assert "  + sub/b.txt" in run_xsync(src).stdout
+    assert "Already up to date" in run_xsync(src).stdout
+
+    (src / "a.txt").write_text("changed content")
+    (src / "sub" / "b.txt").unlink()
+    result = run_xsync(src)
+    assert "  ~ a.txt" in result.stdout
+    assert "  - sub/b.txt" in result.stdout
+    assert "1 updated, 1 deleted" in result.stdout
+    assert "sending incremental file list" not in result.stdout
+
+
+@needs_gnu_rsync
+def test_verbose_shows_raw_rsync_output(project):
+    src, dst = project
+    result = run_xsync(src, "--verbose")
+    assert result.returncode == 0
+    assert "sending incremental file list" in result.stdout
+    assert tree(dst) == {"a.txt", "sub/b.txt"}
+
+
 # --- end to end ------------------------------------------------------------
 
 @pytest.fixture

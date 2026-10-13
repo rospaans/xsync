@@ -15,6 +15,7 @@ Usage:
     xsync file.py --dry-run    # dry-run single-file mode
     xsync --watch              # watch for changes and sync automatically
     xsync --watch --interval 5 # watch with a 5-second debounce window
+    xsync --verbose            # show rsync's raw output instead of the summary
     xsync --help               # show this help
 """
 
@@ -98,9 +99,70 @@ def is_gnu_rsync3(version_output: str) -> bool:
     return re.match(r"rsync\s+version\s+3\.", version_output) is not None
 
 
+# Set by main(): summarize rsync's output instead of passing it through.
+# Needs GNU rsync 3.x; --verbose and other rsync flavors keep the raw output.
+PRETTY = False
+
+COLORS = {"green": "32", "yellow": "33", "red": "31", "dim": "2"}
+
+
+def paint(text: str, color: str) -> str:
+    """Color text for a terminal; plain when piped or when NO_COLOR is set."""
+    if not sys.stdout.isatty() or "NO_COLOR" in os.environ:
+        return text
+    return f"\033[{COLORS[color]}m{text}\033[0m"
+
+
 def rsync_flags(remote: str) -> str:
     """Base rsync flags. Compression only pays off over the network."""
-    return "-avz" if is_ssh_remote(remote) else "-av"
+    flags = "-a" if PRETTY else "-av"
+    return flags + "z" if is_ssh_remote(remote) else flags
+
+
+def parse_change(line: str) -> tuple[str, str]:
+    """Classify one line of `rsync --out-format='%i %n%L'` output.
+
+    Returns (kind, text) with kind one of new, updated, deleted, skip, message.
+    """
+    if not line.strip():
+        return "skip", ""
+    if line.startswith("*deleting"):
+        return "deleted", line[len("*deleting"):].strip()
+    if len(line) > 12 and line[0] in "<>ch." and line[1] in "fdLDS" and line[11] == " ":
+        code, name = line[:11], line[12:]
+        if code[0] == ".":
+            return "skip", name  # attributes only, no content sent
+        return ("new" if "+++++++++" in code else "updated"), name
+    return "message", line
+
+
+CHANGE_MARKS = {"new": ("+", "green"), "updated": ("~", "yellow"), "deleted": ("-", "red")}
+
+
+def run_rsync(cmd: list[str]) -> int:
+    """Run rsync. With PRETTY, print one short line per change and a summary."""
+    if not PRETTY:
+        return subprocess.run(cmd).returncode
+    cmd = [cmd[0], "--out-format=%i %n%L", "--outbuf=L", *cmd[1:]]
+    counts = {"new": 0, "updated": 0, "deleted": 0}
+    seen_messages = set()
+    start = time.monotonic()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    for line in proc.stdout:
+        kind, text = parse_change(line.rstrip("\n"))
+        if kind in counts:
+            counts[kind] += 1
+            mark, color = CHANGE_MARKS[kind]
+            print(paint(f"  {mark} {text}", color), flush=True)
+        elif kind == "message" and text not in seen_messages:
+            seen_messages.add(text)
+            print(paint(f"  ! {text}", "yellow"), flush=True)
+    rc = proc.wait()
+    would = "would be " if "--dry-run" in cmd else ""
+    changes = ", ".join(f"{n} {would}{kind}" for kind, n in counts.items() if n)
+    elapsed = f"({time.monotonic() - start:.1f}s)"
+    print(paint(f"  {changes or 'Already up to date'} {elapsed}", "dim"), flush=True)
+    return rc
 
 
 def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, rsync: list[str] = RSYNC) -> int:
@@ -116,7 +178,7 @@ def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool, r
     ]
     if dry_run:
         cmd.insert(1, "--dry-run")
-    return subprocess.run(cmd).returncode
+    return run_rsync(cmd)
 
 
 def sync_file(file_path: Path, repo_root: Path, remote: str, dry_run: bool, rsync: list[str] = RSYNC) -> int:
@@ -162,7 +224,7 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
     if delete_missing:
         cmd.insert(1, "--delete-missing-args")
     try:
-        return subprocess.run(cmd).returncode
+        return run_rsync(cmd)
     finally:
         files_from.unlink(missing_ok=True)
 
@@ -332,14 +394,14 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
     exclude_file = write_exclude_file(repo_root, exclude_patterns)
 
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] Initial sync {repo_root}/ → {remote}")
+    print(f"[{timestamp}] Initial sync {repo_root.name} → {remote}")
     rc = sync_full(repo_root, remote, exclude_file, dry_run=False, rsync=rsync)
     if rc != 0:
         print(f"[{timestamp}] ⚠️  Initial sync failed with code {rc}. Continuing watch anyway.")
     else:
         print(f"[{timestamp}] ✅ Remote is up to date.")
 
-    print(f"Watching {repo_root}/ → {remote}  (debounce {debounce}s, Ctrl+C to stop)")
+    print(f"Watching {repo_root.name} → {remote}  (debounce {debounce}s, Ctrl+C to stop)")
 
     try:
         while True:
@@ -365,10 +427,12 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
             rc = 0
             rm_rc = 0
             if removals:
-                print(f"[{timestamp}] Deleting {len(removals)} file(s): {', '.join(removals)}")
+                names = "" if PRETTY else f": {', '.join(removals)}"
+                print(f"[{timestamp}] Deleting {len(removals)} file(s){names}")
                 rm_rc = delete_from_remote(removals, repo_root, remote, rsync)
             if batch:
-                print(f"[{timestamp}] Syncing {len(batch)} file(s): {', '.join(batch)}")
+                names = "" if PRETTY else f": {', '.join(batch)}"
+                print(f"[{timestamp}] Syncing {len(batch)} file(s){names}")
                 rc = sync_batch(batch, repo_root, remote, rsync=rsync)
 
             if rc != 0:
@@ -403,7 +467,7 @@ def parse_flag_value(args: list[str], flag: str, default):
     return default
 
 
-KNOWN_FLAGS = {"--init", "--dry-run", "--watch", "--interval", "--help", "-h"}
+KNOWN_FLAGS = {"--init", "--dry-run", "--watch", "--interval", "--verbose", "--help", "-h"}
 
 
 def main():
@@ -454,7 +518,10 @@ def main():
     except OSError:
         print(f"❌ rsync not found: {rsync}")
         sys.exit(1)
-    if not is_gnu_rsync3(version):
+    global PRETTY
+    if is_gnu_rsync3(version):
+        PRETTY = "--verbose" not in args
+    else:
         print(f"⚠️  {rsync} is not GNU rsync 3.x; some flags may behave differently (brew install rsync).")
     rsync = [rsync, *config.get("rsync_args", [])]
 
@@ -493,7 +560,7 @@ def main():
         rc = sync_file(file_path, repo_root, remote, dry_run, rsync)
     else:
         exclude_file = write_exclude_file(repo_root, exclude_patterns)
-        print(f"[{timestamp}] {mode}Syncing {repo_root}/ → {remote}")
+        print(f"[{timestamp}] {mode}Syncing {repo_root.name} → {remote}")
         rc = sync_full(repo_root, remote, exclude_file, dry_run, rsync)
         exclude_file.unlink(missing_ok=True)
 
