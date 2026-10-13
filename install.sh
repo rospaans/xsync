@@ -44,7 +44,9 @@ fi
 PY_VERSION=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 echo "Using $PYTHON ($PY_VERSION)"
 
-# Create a dedicated venv so we can install watchdog without touching system Python
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# A dedicated venv, so xsync and watchdog never touch the system Python
 mkdir -p "$(dirname "$VENV_DIR")"
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "Creating venv at $VENV_DIR..."
@@ -53,18 +55,22 @@ fi
 
 VENV_PYTHON="$VENV_DIR/bin/python3"
 
-# Install watchdog into the venv
+# watchdog is what watch mode uses to notice file changes
 if "$VENV_PYTHON" -c "import watchdog" 2>/dev/null; then
     echo "watchdog already installed."
 else
     echo "Installing watchdog..."
-    "$VENV_PYTHON" -m pip install --quiet watchdog
+    "$VENV_PYTHON" -m pip install --quiet "watchdog>=3"
     echo "watchdog installed."
 fi
 
-# Bake the venv's Python path into the shebang
-sed "1s|.*|#!${VENV_PYTHON}|" "$(dirname "$0")/$SCRIPT_NAME" > "$INSTALL_DIR/$SCRIPT_NAME"
-chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
+# Install xsync itself from this checkout; rerun this script after pulling changes
+echo "Installing xsync from $REPO_DIR..."
+"$VENV_PYTHON" -m pip install --quiet --force-reinstall --no-deps "$REPO_DIR"
 
-echo "Installed xsync to $INSTALL_DIR/$SCRIPT_NAME"
-echo "   Run 'xsync' inside a project. Without a .xsync.toml it offers to create one."
+# Put the command on PATH. An older install left a script here; replace it with a link.
+rm -f "$INSTALL_DIR/$SCRIPT_NAME"
+ln -s "$VENV_DIR/bin/$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
+
+echo "Installed xsync $("$INSTALL_DIR/$SCRIPT_NAME" --version | cut -d' ' -f2) to $INSTALL_DIR/$SCRIPT_NAME"
+echo "   Run 'xsync' in a terminal. Press a to add a project."

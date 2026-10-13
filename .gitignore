@@ -12,3 +12,11 @@ __pycache__/
 # xsync local state
 .xsync.toml
 .xsync.exclude
+.xsync.files
+
+# Build and test leftovers
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.venv/

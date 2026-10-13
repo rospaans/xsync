@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xsync"
+description = "Keep local projects in sync with a server over SSH, from one interactive screen"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Robert Spaans" }]
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = []
+
+[project.optional-dependencies]
+# Needed for watch mode
+watch = ["watchdog>=3"]
+dev = ["pytest>=7", "watchdog>=3"]
+
+[project.scripts]
+xsync = "xsync.cli:main"
+
+[project.urls]
+Repository = "https://github.com/rospaans/xsync"
+
+[tool.setuptools.dynamic]
+version = { attr = "xsync.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]

@@ -23,8 +23,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Compile-check xsync
-        run: python -m py_compile xsync
+      - name: Install xsync with its test dependencies
+        run: python -m pip install --quiet ".[dev]"
 
       - name: Shellcheck install.sh
         if: runner.os == 'Linux'
@@ -33,20 +33,18 @@ jobs:
           sudo apt-get install -y shellcheck
           shellcheck install.sh
 
-      - name: Unit and end-to-end tests
-        run: |
-          python -m pip install --quiet pytest
-          python -m pytest tests -q
+      - name: Tests
+        run: python -m pytest -q
 
-      - name: Smoke test --init, --help, --version, and no sync without a terminal
+      - name: Smoke test the installed command
         shell: bash
         run: |
           set -euo pipefail
           SRC=$(mktemp -d)
           cd "$SRC"
-          python "$GITHUB_WORKSPACE/xsync" --help
-          python "$GITHUB_WORKSPACE/xsync" --version
-          python "$GITHUB_WORKSPACE/xsync" --init
+          xsync --help
+          xsync --version
+          xsync --init
           test -f .xsync.toml
           # xsync is interactive: without a terminal it must refuse to run
-          if python "$GITHUB_WORKSPACE/xsync"; then exit 1; fi
+          if xsync; then exit 1; fi

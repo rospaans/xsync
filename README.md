@@ -27,11 +27,11 @@ xsync is now an interactive tool for SSH remotes. You run `xsync` in a terminal 
 - **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) shows as `OFFLINE` within seconds; xsync keeps running and retries.
 - **rsync flavor**: xsync uses `/opt/homebrew/bin/rsync` if present, else `rsync` from `PATH`. With anything other than GNU rsync 3.x it warns and shows rsync's raw output. An optional `rsync = "/path/to/rsync"` key overrides the choice (see Troubleshooting).
 - **Extra rsync flags**: optional `rsync_args = [...]` key, for example for server folders on storage that rejects permission, ownership or timestamp changes (see "Remotes on a network share").
-- **Tests**: `python -m pytest tests`.
+- **A package, not one script**: the code lives in `src/xsync/`, split by responsibility, with tests in `tests/`. See "Development".
 
 ## What it does
 
-`xsync` reads a `.xsync.toml` file from the project root and uses `rsync` over SSH to keep the `remote` folder declared there identical to your local project. The logic lives in a single script on your `$PATH`; each project only needs a declarative config. Syncing is one way: local to remote.
+`xsync` reads a `.xsync.toml` file from the project root and uses `rsync` over SSH to keep the `remote` folder declared there identical to your local project. It is one command on your `$PATH`; each project only needs a declarative config. Syncing is one way: local to remote.
 
 You run `xsync` in a terminal and press a key:
 
@@ -58,7 +58,15 @@ cd xsync
 bash install.sh
 ```
 
-The installer copies `xsync` to `~/.local/bin` and, if needed, adds it to your `PATH` in `~/.zshrc` or `~/.bashrc`. Restart your shell or `source` the rc file afterwards.
+The installer:
+
+- creates a private Python environment in `~/.local/share/xsync/venv`, so nothing is added to your system Python;
+- installs xsync and `watchdog` (used by watch mode) into it;
+- links the `xsync` command into `~/.local/bin` and, if needed, adds that folder to your `PATH` in `~/.zshrc` or `~/.bashrc`. Restart your shell or `source` the rc file afterwards.
+
+To update, pull the changes and run `bash install.sh` again.
+
+If you manage Python tools yourself, `pipx install '.[watch]'` or `uv tool install '.[watch]'` from the checkout does the same.
 
 ## SSH setup
 
@@ -563,6 +571,38 @@ rsync = "/usr/local/bin/rsync"
 ```
 
 This setting is not in the starter config because the automatic choice is right in most setups.
+
+## Development
+
+```bash
+git clone https://github.com/rospaans/xsync.git
+cd xsync
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e '.[dev]'
+python -m pytest                 # the test suite
+python -m xsync                  # run from the checkout
+```
+
+The code is in `src/xsync/`:
+
+| Module | What it holds |
+|---|---|
+| `cli.py` | The command line: `--help`, `--version`, `--init`, and starting the app. |
+| `app.py` | The hub: the overview of all projects, one project's view, key handling, and the loop that drives both. |
+| `project.py` | One project: loading its config, compare, sync, watch mode and its queue, the after-burst check, connection state. |
+| `rsync.py` | Everything that runs rsync: full syncs, single paths, watch-mode batches and deletes, and reading rsync's output. |
+| `remote.py` | The `remote` setting: telling SSH targets from local paths, and refusing dangerous ones. |
+| `excludes.py` | The exclude check watch mode uses, matching rsync's patterns. |
+| `config.py` | The starter config, finding a project's folder, and the list of known projects. |
+| `ui.py` | Drawing the fixed rows of a view, and reading keys from the terminal. |
+| `output.py` | The small shared state, colors, and the lines that end up in a project's list. |
+
+The tests in `tests/` call these functions directly, against scratch folders, because xsync itself needs a terminal. A few of them run the real file watcher, including a burst of 3000 file changes; one optional test syncs over `ssh localhost` and is skipped where that is not available.
+
+Two helper scripts:
+
+- `tests/stress_edits.py` makes a burst of file changes in the current folder, to watch xsync keep up. Run it inside a watched project.
+- `docs/make_pictures.py` regenerates the pictures at the top of this README from xsync's own drawing code, with placeholder names.
 
 ## License
 
