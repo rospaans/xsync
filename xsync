@@ -187,29 +187,6 @@ BUTTON_LABEL = "38;5;255;48;5;238"
 BUTTON_GAP = 2
 
 
-# A 3x5 pixel font for the mode name in the banner. A terminal cannot enlarge
-# text, so big letters are drawn from half-block characters, two pixels per row.
-BIG_FONT = {
-    "A": ("010", "101", "111", "101", "101"), "C": ("111", "100", "100", "100", "111"),
-    "E": ("111", "100", "110", "100", "111"), "F": ("111", "100", "110", "100", "100"),
-    "H": ("101", "101", "111", "101", "101"), "I": ("111", "010", "010", "010", "111"),
-    "L": ("100", "100", "100", "100", "111"), "N": ("110", "101", "101", "101", "101"),
-    "O": ("111", "101", "101", "101", "111"), "S": ("111", "100", "111", "001", "111"),
-    "T": ("111", "010", "010", "010", "010"), "W": ("101", "101", "101", "111", "101"),
-    "X": ("101", "101", "010", "101", "101"), "Y": ("101", "101", "010", "010", "010"),
-}
-
-
-def big_text(word: str) -> list[str]:
-    """Render a word in BIG_FONT as three rows of half-block characters."""
-    pixels = ["0".join(BIG_FONT[letter][row] for letter in word) for row in range(5)] + [""]
-    rows = []
-    for top, bottom in zip(pixels[0::2], pixels[1::2]):
-        bottom = bottom.ljust(len(top), "0")
-        rows.append("".join(" ▄▀█"[int(t) * 2 + int(b)] for t, b in zip(top, bottom)))
-    return rows
-
-
 def styled(segments: list[tuple[str, str]], background: str = "") -> str:
     """Join (text, color code) pairs into one string; plain text when colors are off."""
     if not colors_on():
@@ -323,21 +300,13 @@ class Screen:
         return rows
 
     def banner(self, width: int) -> list[str]:
-        """The status bar as a tall band, with the mode name in big letters when there is room."""
+        """The status bar as a three-row band, with the mode name on a block of its full height."""
         style = BAR_BADGE[self.mode]
-        letters = big_text(BAR_LABEL[self.mode])
-        badge_width = len(letters[0]) + 4
-        if width < badge_width + 45:
-            # Narrow: the one-row bar, with a row of its background above and below
-            padding = styled([(" " * width, "")], BAR_BACKGROUND)
-            return [padding, self.bar(width), padding]
-        rest = (" " * (width - badge_width), "")
-        rows = [styled([(" " * badge_width, style), rest], BAR_BACKGROUND)]
-        for index, line in enumerate(letters):
-            badge = (f"  {line}  ", style)
-            # The details go next to the middle row of the letters
-            rows.append(self.bar(width, badge) if index == 1 else styled([badge, rest], BAR_BACKGROUND))
-        return rows
+        label = BAR_LABEL[self.mode]
+        # Letter-spaced on a wide block when there is room, compact otherwise
+        text = f"   {' '.join(label)}   " if width >= 90 else f" {label} "
+        edge = styled(clip_segments([(" " * len(text), style), (" " * width, "")], width), BAR_BACKGROUND)
+        return [edge, self.bar(width, (text, style)), edge]
 
     def header_rows(self, width: int) -> list[str]:
         """Everything that stays fixed at the top, one string per terminal row."""
