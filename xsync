@@ -158,7 +158,8 @@ def is_ssh_remote(remote: str) -> bool:
 def ssh_reachable(remote: str) -> bool:
     """Check that the SSH host answers without prompting for a password."""
     host = remote.split(":", 1)[0]
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"]
+    # -T: no terminal, even if ~/.ssh/config sets RequestTTY for this host
+    cmd = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"]
     return subprocess.run(cmd).returncode == 0
 
 
@@ -196,7 +197,7 @@ def delete_from_remote(deleted_rels: list[str], remote: str) -> int:
     """Delete specific files from remote without a full rsync scan."""
     if is_ssh_remote(remote):
         host, remote_base = remote.split(":", 1)
-        rc = subprocess.run(["ssh", host, build_remote_rm_command(remote_base, deleted_rels)]).returncode
+        rc = subprocess.run(["ssh", "-T", host, build_remote_rm_command(remote_base, deleted_rels)]).returncode
         if rc != 0:
             print(f"⚠️  Remote delete failed: ssh exited with code {rc}.")
         return rc
