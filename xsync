@@ -232,6 +232,25 @@ def delete_from_remote(deleted_rels: list[str], repo_root: Path, remote: str, rs
     return 0
 
 
+def pattern_matches(pattern: str, parts: tuple[str, ...], is_dir: bool) -> bool:
+    """Test one rsync-style exclude pattern against a path given as its components.
+
+    Supports the common subset: a trailing / matches directories only, a leading /
+    anchors at the project root, and a pattern containing / matches whole
+    components at the end of the path.
+    """
+    if pattern.endswith("/") and not is_dir:
+        return False
+    anchored = pattern.startswith("/")
+    pat = pattern.strip("/")
+    if not pat:
+        return False
+    if anchored:
+        return fnmatch.fnmatch("/".join(parts), pat)
+    depth = pat.count("/") + 1
+    return len(parts) >= depth and fnmatch.fnmatch("/".join(parts[-depth:]), pat)
+
+
 def make_excluded_checker(repo_root: Path, patterns: list[str]):
     """Return a function that tests whether a resolved path should be excluded."""
     def is_excluded(abs_path: str) -> bool:
@@ -243,18 +262,10 @@ def make_excluded_checker(repo_root: Path, patterns: list[str]):
             return True
         parts = rel.parts
         for pattern in patterns:
-            stripped = pattern.rstrip("/")
-            is_dir_pattern = pattern.endswith("/")
-            # Match filename against pattern
-            if fnmatch.fnmatch(rel.name, stripped):
+            # The file itself, then every directory above it
+            if pattern_matches(pattern, parts, is_dir=False):
                 return True
-            # Match any path component against directory patterns
-            if is_dir_pattern:
-                for part in parts[:-1]:
-                    if fnmatch.fnmatch(part, stripped):
-                        return True
-            # Match full relative path
-            if fnmatch.fnmatch(str(rel), pattern):
+            if any(pattern_matches(pattern, parts[:i], is_dir=True) for i in range(1, len(parts))):
                 return True
         return False
     return is_excluded

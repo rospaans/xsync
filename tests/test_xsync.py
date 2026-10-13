@@ -105,6 +105,30 @@ def test_make_excluded_checker(path, expected):
     assert is_excluded(path) is expected
 
 
+@pytest.mark.parametrize("path, expected", [
+    # "/data/" is anchored: only the top-level data folder
+    ("/repo/data/table.csv", True),
+    ("/repo/data/raw/deep/table.csv", True),
+    ("/repo/src/pkg/data/loader.py", False),
+    ("/repo/data.py", False),
+    # multi-part directory pattern
+    ("/repo/scripts/experiments/soma/README.md", True),
+    ("/repo/scripts/experiments/soma/src/model.py", True),
+    ("/repo/scripts/experiments/other/run.py", False),
+    ("/repo/scripts/soma.py", False),
+    # anchored file pattern
+    ("/repo/notes.txt", True),
+    ("/repo/docs/notes.txt", False),
+    # a directory pattern does not match a file of the same name
+    ("/repo/src/outputs", False),
+    ("/repo/src/outputs/run1.json", True),
+])
+def test_excluded_checker_anchored_and_nested_patterns(path, expected):
+    patterns = ["/data/", "scripts/experiments/soma/", "/notes.txt", "outputs/"]
+    is_excluded = xsync.make_excluded_checker(Path("/repo"), patterns)
+    assert is_excluded(path) is expected
+
+
 # --- awkward filenames -----------------------------------------------------
 
 NASTY_NAMES = [
