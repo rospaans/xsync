@@ -393,13 +393,15 @@ The last line is a summary, or "Already up to date". With `--dry-run` it says "w
 `xsync --watch` does one full sync and then sends changes as you make them. The header stays fixed at the top of the terminal and always says what xsync is doing: `in sync, watching for changes` when idle, `syncing…` during a batch, or `offline` when the server cannot be reached. It also shows a running count and the time of the last change. Each change appears below it with the time:
 
 ```
- WATCH   my_project → myhost:/data/projects/you/my_project/  in sync, watching for changes · 4 changes · last 15:26:41 · ssh
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ WATCH   my_project  →  myhost:/data/projects/you/my_project/          ● in sync, watching for changes  ·  4 changes · last 15:26:41  ·  ssh
+
 15:26:27  + notes/draft.md
 15:26:31  ~ src/model.py
 15:26:41  - notes/draft.md
 15:26:41  - notes/
 ```
+
+The header is a full-width bar: the project and remote on the left, the state on the right behind a dot that is green when idle, yellow while syncing and magenta when offline.
 
 On a narrow terminal the header drops details from the right, keeping the state.
 
