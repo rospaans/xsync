@@ -853,7 +853,7 @@ def test_overview_keys_move_open_and_go_back(hub, tmp_path):
     assert hub.selected == 0
     hub.on_overview_key("j")
     hub.on_overview_key("\n")
-    assert hub.view is hub.projects[1] and hub.view.touched
+    assert hub.view is hub.projects[1] and not hub.view.touched   # looking is not acting
     hub.on_project_key("esc")
     assert hub.view is None
 
@@ -863,6 +863,22 @@ def test_overview_keys_move_open_and_go_back(hub, tmp_path):
     assert not hub.pretty and all(project.verbose for project in hub.projects)
     hub.on_overview_key("x")
     assert [project.name for project in hub.projects] == ["alpha"]
+
+
+def test_starting_and_opening_run_nothing(hub, monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("rsync or ssh was started without a key press")
+
+    monkeypatch.setattr(xsync.subprocess, "Popen", fail)
+    monkeypatch.setattr(xsync.subprocess, "run", fail)
+    project = hub.projects[0]
+    hub.draw()
+    hub.open(project)
+    for _ in range(3):
+        project.tick(1e12)                                 # long after any timer would be due
+    hub.back()
+    assert project.log == xsync.deque() and project.panel.state == "idle, nothing checked yet"
+    assert not project.touched and not project.watching
 
 
 def test_overview_summary_counts_states(hub, tmp_path):

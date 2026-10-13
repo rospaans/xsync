@@ -210,7 +210,7 @@ This syncs to `/data/projects/you/research/project_1/` on the server. For severa
 | `~/work/project_1/` | `myhost-sync:research/project_1/` | `/data/projects/you/research/project_1/` |
 | `~/work/project_2/` | `myhost-sync:research/project_2/` | `/data/projects/you/research/project_2/` |
 
-The key keeps every project inside the boundary. The `remote` line keeps each project in its own folder. Start `xsync` and check the remote shown in the bar; the compare it opens with changes nothing.
+The key keeps every project inside the boundary. The `remote` line keeps each project in its own folder. Start `xsync`, check the remote shown in the bar, and press `c` to compare; that changes nothing.
 
 ### Adding another folder
 
@@ -269,7 +269,7 @@ exclude = [
 
 The `remote` field is an SSH target in the form `host:/path/`, where `host` is an alias from `~/.ssh/config`. `user@host:/path/` also works.
 
-Full syncs delete remote files that do not exist locally, so point `remote` at a folder used only for this project, and read the compare that `xsync` opens with before the first real sync. Files matching `exclude` are never deleted on the remote.
+Full syncs delete remote files that do not exist locally, so point `remote` at a folder used only for this project, and press `c` to compare before the first real sync. Files matching `exclude` are never deleted on the remote.
 
 ## Setting up a new project
 
@@ -310,7 +310,7 @@ Use a folder that belongs to this project alone. A full sync deletes anything in
 xsync
 ```
 
-This also adds the project to xsync's overview. It opens with a compare: the list shows what would be copied (`+`, `~`) or deleted (`-`) on the server, and nothing has changed yet. Check the remote shown in the bar and the `-` lines in particular. If it looks right, press `s` to sync, or `w` to sync and keep watching.
+This also adds the project to xsync's overview. Nothing happens until you press a key. Press `c` to compare: the list shows what would be copied (`+`, `~`) or deleted (`-`) on the server, and nothing has changed yet. Check the remote shown in the bar and the `-` lines in particular. If it looks right, press `s` to sync, or `w` to sync and keep watching.
 
 **Several projects** each get their own config and their own server folder:
 
@@ -401,7 +401,7 @@ Each row is a project: its name, where it syncs to, what it is doing, and how ma
 
 ### A project
 
-Opening a project from the overview, or running `xsync` inside its folder, shows that project. Started inside the folder, xsync first compares it with the server, like `git status`; nothing changes until you press a key:
+Opening a project from the overview, or running `xsync` inside its folder, shows that project. Starting xsync does nothing by itself: it does not compare, sync or contact the server until you press a key. After `c` (compare, like `git status`) it looks like this:
 
 ```
  XSYNC   my_project  →   SSH  myhost:/data/projects/you/my_project/                   ● 3 differences at 15:52    0 changes
@@ -469,7 +469,7 @@ Press `w`. xsync does a full sync and then sends changes as they happen, in batc
 
 ### When the connection drops
 
-xsync keeps running. For every project you have opened or are watching, it checks the server once a minute even when nothing changes, so a dropped VPN shows up without waiting for an edit. When offline, the badge reads `OFFLINE`, changes made in watch mode are queued, and xsync retries every 10 seconds. `r` retries immediately. When the server answers again, the queued changes are sent.
+xsync keeps running. For every project you are watching or have run an action on, it checks the server once a minute even when nothing changes, so a dropped VPN shows up without waiting for an edit. When offline, the badge reads `OFFLINE`, changes made in watch mode are queued, and xsync retries every 10 seconds. `r` retries immediately. When the server answers again, the queued changes are sent.
 
 The terminal tab title shows the project and state, so you can see it when the terminal is in the background.
 

@@ -8,7 +8,8 @@ an alias from ~/.ssh/config (key auth, ideally with ControlMaster so repeated
 syncs reuse one connection). A local path (e.g. a mounted volume) also works.
 
 Usage:
-    xsync                      # in a project: open it; elsewhere: the overview of all projects
+    xsync                      # in a project: open it; elsewhere: the overview of all projects.
+                               # Nothing is compared, synced or contacted until you press a key.
     xsync --verbose            # the same, showing rsync's raw output
     xsync --init               # create a starter .xsync.toml in current dir
     xsync --version            # show the version
@@ -755,8 +756,8 @@ class Project:
         self.offline = False
         self.changes = 0
         self.last_change = ""
-        self.resting = ("not compared yet", "busy")  # what the bar says when idle and not watching
-        self.touched = False  # opened or acted on; only then is its host checked periodically
+        self.resting = ("idle, nothing checked yet", "busy")  # what the bar says when idle and not watching
+        self.touched = False  # the user ran an action on it; only then is its host checked periodically
         self.last_flush = self.last_beat = time.monotonic()
         self.error = ""  # why this project cannot be synced, if it cannot
         self.config: dict = {}
@@ -1324,7 +1325,6 @@ class App:
     def open(self, project: Project):
         self.view = project
         self.selected = self.projects.index(project)
-        project.touched = True
         self.notes = []
         self.draw(clear=True)
 
@@ -1409,27 +1409,25 @@ class App:
         elif key in actions or key == "f":
             if project.error:
                 warn(project.error, "magenta")
-            elif key == "f":
-                text = self.ask("file or folder to sync (type, paste or drag it here)")
-                if text:
-                    project.sync_one(text)
             else:
-                actions[key]()
+                project.touched = True
+                if key == "f":
+                    text = self.ask("file or folder to sync (type, paste or drag it here)")
+                    if text:
+                        project.sync_one(text)
+                else:
+                    actions[key]()
 
     def run(self, start: Project | None = None):
-        """Show the overview, or go straight to `start` and compare it, then handle keys until quit."""
+        """Show the overview, or go straight to `start`, then handle keys until quit."""
         global OUTPUT
         try:
             with self.screen:
                 if hasattr(signal, "SIGWINCH"):
                     signal.signal(signal.SIGWINCH, lambda *_: self.draw(clear=True))
+                # Nothing runs until a key is pressed: no compare, no sync, no connection
                 if start is not None:
                     self.open(start)
-                    if start.error:
-                        self.activate(start)
-                        warn(start.error, "magenta")
-                    else:
-                        start.compare()
                 else:
                     self.draw()
                 while True:
