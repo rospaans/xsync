@@ -63,8 +63,12 @@ exclude = [
 ]
 
 # --- Optional settings: remove the leading "# " from a line to use it ---
-# remote = "/Volumes/your-volume/your-project/"   # a local path instead of SSH (replaces the remote line above)
-# rsync_args = []                                  # extra rsync flags, e.g. for a network share: see "Remotes on a network share" in the README
+# A local path instead of SSH (replaces the remote line above)
+# remote = "/Volumes/your-volume/your-project/"
+
+# Extra rsync flags. This set is for a server folder on a network share (CIFS/SMB)
+# that rejects permission, ownership and timestamp changes; see the README.
+# rsync_args = ["--no-perms", "--no-owner", "--no-group", "--no-times", "--omit-dir-times", "--inplace", "--checksum"]
 """
 
 
