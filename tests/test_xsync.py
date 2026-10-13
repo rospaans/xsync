@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -801,6 +802,134 @@ def test_each_project_keeps_its_own_list_and_counter(hub, tmp_path):
     assert not any("only-in-beta.txt" in line for line in alpha.log)
     assert tree(beta_remote) == {"only-in-beta.txt"}
     assert tree(Path(alpha.remote)) == {"a.txt", "sub/b.txt"}
+
+
+def run_ticks(project, seconds: float):
+    """Let a watched project work for a while, as the main loop would."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        project.tick(time.monotonic())
+        time.sleep(0.05)
+
+
+@pytest.fixture
+def watched(hub, monkeypatch):
+    """The hub's project with watch mode on, short timers, and its remote folder."""
+    pytest.importorskip("watchdog")
+    if not _default_rsync_is_gnu():
+        pytest.skip("needs GNU rsync 3.x")
+    monkeypatch.setattr(xsync, "SETTLE_SECONDS", 0.6)
+    project = hub.projects[0]
+    project.interval = 0.2
+    project.start_watch()
+    return project, Path(project.remote)
+
+
+def test_watch_sends_edits_and_deletes(watched):
+    project, dst = watched
+    assert tree(dst) == {"a.txt", "sub/b.txt"}            # switching watch on starts with a full sync
+    time.sleep(0.5)                                         # let the watcher settle
+    (project.root / "new").mkdir()
+    (project.root / "new" / "n.txt").write_text("n")
+    (project.root / "a.txt").write_text("changed")
+    run_ticks(project, 2)
+    assert tree(dst) == {"a.txt", "sub/b.txt", "new/n.txt"}
+    assert (dst / "a.txt").read_text() == "changed"
+
+    shutil.rmtree(project.root / "new")
+    (project.root / "sub" / "b.txt").unlink()
+    run_ticks(project, 2)
+    assert tree(dst) == {"a.txt"}
+    assert not (dst / "new").exists()                      # the emptied folder is gone too
+    assert not any("! " in line for line in project.log)
+
+
+def test_a_burst_leaves_the_remote_identical(watched):
+    """Thousands of changes at once: whatever the watcher misses is caught by the check afterwards."""
+    project, dst = watched
+    time.sleep(0.5)
+    burst = subprocess.Popen([sys.executable, str(XSYNC_PATH.parent / "tests" / "stress_edits.py"),
+                              "--files", "3000", "--pause", "0", "--keep"], cwd=project.root, stdout=subprocess.DEVNULL)
+    run_ticks(project, 12)
+    assert burst.wait() == 0
+    assert tree(dst) == tree(project.root) - {".xsync.toml"}
+    assert len(tree(dst)) > 500
+
+    shutil.rmtree(project.root / "xsync_stress_test")
+    run_ticks(project, 8)
+    assert tree(dst) == {"a.txt", "sub/b.txt"}
+    assert not (dst / "xsync_stress_test").exists()
+
+
+@needs_gnu_rsync
+def test_check_after_burst_mirrors_only_the_touched_folders(hub):
+    project = hub.projects[0]
+    dst = Path(project.remote)
+    project.full_sync()
+    (project.root / "sub" / "deep").mkdir()
+    (project.root / "sub" / "deep" / "d.txt").write_text("d")
+    project.full_sync()
+    # Drift the watcher never reported: a stale file, a missing file, a stale folder
+    (dst / "sub" / "stale.txt").write_text("should go")
+    (dst / "sub" / "deep" / "untouched-stale.txt").write_text("in a folder that was not touched")
+    (dst / "gone").mkdir()
+    (dst / "gone" / "old.txt").write_text("its local folder was deleted")
+    (dst / "sub" / "ignored").mkdir()
+    (dst / "sub" / "ignored" / "remote-only.txt").write_text("excluded: never ours to delete")
+    (project.root / "sub" / "missed.txt").write_text("never reported")
+
+    project.observer = object()                              # as if watching
+    project.touched_dirs = {"sub", "gone"}
+    project.unchecked = xsync.BURST_PATHS
+    project.last_event = time.monotonic() - 60
+    project.tick(time.monotonic())
+    project.observer = None
+
+    assert tree(dst) == {"a.txt", "sub/b.txt", "sub/missed.txt", "sub/deep/d.txt",
+                         "sub/deep/untouched-stale.txt", "sub/ignored/remote-only.txt"}
+    assert project.touched_dirs == set() and project.unchecked == 0
+    assert "after a burst" in project.log[-1]
+
+
+def test_a_few_changes_do_not_trigger_the_check(hub, monkeypatch):
+    project = hub.projects[0]
+    monkeypatch.setattr(project, "check_after_burst", lambda: pytest.fail("checked without a burst"))
+    project.observer = object()
+    project.touched_dirs, project.unchecked = {"sub"}, 5
+    project.last_event = time.monotonic() - 10
+    project.tick(time.monotonic())
+    assert project.touched_dirs == {"sub"}                 # kept for now
+    project.last_event = time.monotonic() - 60
+    project.tick(time.monotonic())
+    assert project.touched_dirs == set() and project.unchecked == 0   # forgotten once long settled
+    project.observer = None
+
+
+@needs_gnu_rsync
+def test_cancelling_a_sync(hub, monkeypatch):
+    project = hub.projects[0]
+    for number in range(300):
+        (project.root / f"file_{number}.txt").write_text("x" * 2000)
+    monkeypatch.setattr(hub, "while_waiting", lambda project, seconds: True)   # as if Esc was pressed at once
+    slow = [*project.rsync, "--bwlimit=20"]                 # slow enough to still be running
+    monkeypatch.setattr(project, "rsync", slow)
+    project.full_sync()
+    assert "cancelled" in project.panel.state and any("cancelled" in line for line in project.log)
+    assert len(tree(Path(project.remote))) < 300
+    assert not any("rsync exited" in line for line in project.log)
+
+
+def test_the_screen_stays_alive_while_rsync_runs(hub):
+    project = hub.projects[0]
+    project.panel.state = "syncing…"
+    assert hub.while_waiting(project, 1.0) is False and project.panel.state == "syncing…"
+    assert hub.while_waiting(project, 12.4) is False
+    assert project.panel.state == "syncing…  ·  12s, Esc cancels"
+    hub.while_waiting(project, 13.2)
+    assert project.panel.state == "syncing…  ·  13s, Esc cancels"   # replaced, not appended
+    keys = iter(["up", "esc", None])
+    hub.screen.read_key = lambda timeout: next(keys)
+    assert hub.while_waiting(project, 14) is True          # Esc asks for the sync to be cancelled
 
 
 def test_only_the_project_on_screen_prints_its_lines(hub, capsys):

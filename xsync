@@ -163,6 +163,10 @@ class Printer:
     def problem(self, text: str):
         pass
 
+    def waiting(self, seconds: float) -> bool:
+        """Called a few times a second while rsync runs. Return True to cancel it."""
+        return False
+
 
 # The project whose rsync is running takes this over, so its lines land in its own log
 OUTPUT = Printer()
@@ -208,7 +212,7 @@ KEY_HELP = {
     "c": "compare with the server, like git status; changes nothing",
     "f": "sync one file or folder: type, paste or drag a path, then Enter",
     "r": "check the connection now and send what was queued",
-    "b": "back to the overview of all projects (Esc and ← work too)",
+    "b": "back to the overview of all projects (Esc and ← work too); during a sync, Esc cancels it",
     "i": "info: project, remote, host, rsync and flags in use",
     "p": "problems: list recorded warnings and errors, clear the problem line",
     "e": "edit this project's .xsync.toml in your editor ($VISUAL, $EDITOR, or nano)",
@@ -481,11 +485,17 @@ SSH_COMMAND = "ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterv
 CHANGE_MARKS = {"new": ("+", "green"), "updated": ("~", "blue"), "deleted": ("-", "red")}
 
 
+# What run_rsync returns when the user cancelled it
+CANCELLED = -1000
+
+
 def run_rsync(cmd: list[str], quiet: bool = False) -> int:
     """Run rsync and turn its output into lines for the active project.
 
     With PRETTY that is one short line per change; otherwise rsync's own
     output. quiet hides rsync's messages and errors (changes are still shown).
+    While rsync runs, OUTPUT.waiting() is called regularly so the screen stays
+    alive; if it returns True rsync is stopped and CANCELLED is returned.
     """
     global CHANGES
     dry_run = "--dry-run" in cmd
@@ -494,13 +504,12 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
     counts = {"new": 0, "updated": 0, "deleted": 0}
     seen_messages = set()
     deleting_missing = "--delete-missing-args" in cmd
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-    for line in proc.stdout:
-        line = line.rstrip("\n")
+
+    def handle(line: str):
         if not PRETTY:
             if line.strip() and not quiet:
                 emit(line, "dim")
-            continue
+            return
         kind, text = parse_change(line)
         if kind in counts:
             counts[kind] += 1
@@ -508,14 +517,34 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
             emit(f"{mark} {text}", color, note="not synced" if dry_run else "")
         elif kind == "message" and not quiet and text not in seen_messages:
             if deleting_missing and text.startswith(VANISHED_MESSAGES):
-                continue
+                return
             seen_messages.add(text)
             warn(text)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    started = time.monotonic()
+    cancelled = False
+    unfinished = b""
+    while True:
+        ready, _, _ = select.select([proc.stdout], [], [], 0.25)
+        if not ready:
+            if not cancelled and OUTPUT.waiting(time.monotonic() - started):
+                cancelled = True
+                proc.terminate()
+            continue
+        data = os.read(proc.stdout.fileno(), 65536)
+        if not data:
+            break
+        *lines, unfinished = (unfinished + data).split(b"\n")
+        for line in lines:
+            handle(line.decode("utf-8", "replace"))
+    if unfinished:
+        handle(unfinished.decode("utf-8", "replace"))
     rc = proc.wait()
     LAST_COUNTS.update(counts)
     if not dry_run:
         CHANGES += sum(counts.values())
-    return rc
+    return CANCELLED if cancelled else rc
 
 
 def sync_full(repo_root: Path, remote: str, exclude_file: Path, dry_run: bool,
@@ -583,13 +612,15 @@ def inside_remote(rels: list[str]) -> list[str]:
 
 def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = False,
                rsync: list[str] = RSYNC, delete_missing: bool = False, quiet: bool = False,
-               mirror_excludes: Path | None = None) -> int:
+               mirror_excludes: Path | None = None, recursive: bool = True) -> int:
     """Sync a batch of relative paths using rsync --files-from.
 
     --files-from implies --relative, so missing parent directories are created.
     With delete_missing, listed files that no longer exist locally are deleted
     on the remote. With mirror_excludes (an exclude file), listed folders are
-    mirrored like a full sync: sent recursively, with remote extras deleted.
+    mirrored like a full sync, with remote extras deleted: whole trees, or with
+    recursive=False only what is directly inside each folder (list them with a
+    trailing slash; subfolders that exist on both sides are left alone).
     """
     batch = inside_remote(batch)
     if not batch:
@@ -600,7 +631,7 @@ def sync_batch(batch: list[str], repo_root: Path, remote: str, dry_run: bool = F
         rsync[0],
         rsync_flags(remote),
         *rsync[1:],  # extra args go after -a so they can override it
-        *(["-r", "--delete", f"--exclude-from={mirror_excludes}"] if mirror_excludes else []),
+        *((["-r"] if recursive else []) + ["--delete", f"--exclude-from={mirror_excludes}"] if mirror_excludes else []),
         "--files-from", str(files_from),
         str(repo_root) + "/",
         remote,
@@ -752,6 +783,11 @@ RETRY_SECONDS = 10
 # Seconds watch mode collects changes before sending them; `interval` in .xsync.toml overrides it
 DEFAULT_INTERVAL = 2.0
 HEARTBEAT_SECONDS = 60
+# After this many paths were sent in watch mode, the touched folders are checked once things
+# have been quiet for SETTLE_SECONDS; fewer than that are forgotten after FORGET_SECONDS
+BURST_PATHS = 100
+SETTLE_SECONDS = 3
+FORGET_SECONDS = 30
 IDLE = "in sync, watching for changes"
 # Lines of history kept per project, so its list can be shown again after looking elsewhere
 LOG_LINES = 2000
@@ -796,6 +832,11 @@ class Project:
         self.resting = ("idle, nothing checked yet", "busy")  # what the bar says when idle and not watching
         self.touched = False  # the user ran an action on it; only then is its host checked periodically
         self.scroll = 0  # lines the list on screen is scrolled back from its end; 0 follows new lines
+        # Folders the watcher saw changes in, and how many paths were sent, since the last check
+        # (see check_after_burst); last_event is when the watcher last reported anything
+        self.touched_dirs: set[str] = set()
+        self.unchecked = 0
+        self.last_event = time.monotonic()
         self.last_flush = self.last_beat = time.monotonic()
         self.error = ""  # why this project cannot be synced, if it cannot
         self.config: dict = {}
@@ -877,6 +918,9 @@ class Project:
         self.log.append(text)
         self.app.show_line(self, text)
 
+    def waiting(self, seconds: float) -> bool:
+        return self.app.while_waiting(self, seconds)
+
     def problem(self, text: str):
         self.problems.append((clock(), text))
         self.panel.message = f"last problem {clock()}: {text}   [p] shows all"
@@ -939,7 +983,9 @@ class Project:
             self.offline = False
             emit("reconnected", "green")
         for code in codes:
-            if code != 0:
+            if code == CANCELLED:
+                emit("cancelled", "yellow")
+            elif code != 0:
                 warn(f"rsync exited with code {code}", "magenta")
         return True
 
@@ -964,7 +1010,12 @@ class Project:
             if not self.count_changes(before) and rc == 0 and PRETTY:
                 emit("already up to date", "dim")
             when = clock()[:5]
-            self.resting = (f"in sync at {when}", "ok") if rc == 0 else (f"sync had errors at {when}", "problem")
+            if rc == 0:
+                self.resting = (f"in sync at {when}", "ok")
+            elif rc == CANCELLED:
+                self.resting = (f"sync cancelled at {when}", "busy")
+            else:
+                self.resting = (f"sync had errors at {when}", "problem")
         self.rest()
 
     def compare(self):
@@ -975,7 +1026,9 @@ class Project:
         if self.reached([rc]):
             differences = sum(LAST_COUNTS.values())
             when = clock()[:5]
-            if not PRETTY:
+            if rc == CANCELLED:
+                self.resting = (f"compare cancelled at {when}", "busy")
+            elif not PRETTY:
                 self.resting = (f"compared at {when}", "busy")  # raw output: the count is not known
             elif differences:
                 emit(f"{differences} difference(s), nothing changed; press s to sync", "dim")
@@ -1011,6 +1064,21 @@ class Project:
         project = self
 
         class Handler(FileSystemEventHandler):
+            def on_any_event(self, event):
+                # Remember the folder each change was in, for check_after_burst
+                project.last_event = time.monotonic()
+                for abs_path in (event.src_path, getattr(event, "dest_path", "")):
+                    # A folder counts as excluded if a file directly inside it would be
+                    probe = str(Path(abs_path) / "x") if event.is_directory else abs_path
+                    if not abs_path or project.is_excluded(probe):
+                        continue
+                    try:
+                        folder = str(Path(abs_path).parent.relative_to(project.root))
+                    except ValueError:
+                        continue  # the project folder itself
+                    with project.lock:
+                        project.touched_dirs.add(folder)
+
             def _handle(self, abs_path: str):
                 if project.is_excluded(abs_path):
                     return
@@ -1078,6 +1146,8 @@ class Project:
         with self.lock:
             self.pending.clear()
             self.deleted.clear()
+            self.touched_dirs.clear()
+        self.unchecked = 0
 
     def flush(self):
         """Send what the watcher collected since the last flush."""
@@ -1106,13 +1176,56 @@ class Project:
             codes.append(delete_from_remote(removals, self.root, self.remote, self.rsync, quiet=self.offline))
         if batch:
             codes.append(sync_batch(batch, self.root, self.remote, rsync=self.rsync, quiet=self.offline))
-        if self.reached(codes):
+        if CANCELLED in codes:
+            # Carrying on would send a partial picture; a full sync on the next "watch on" catches up
+            self.reached(codes)
+            self.close()
+            emit("watch mode switched off because the sync was cancelled", "yellow")
+        elif self.reached(codes):
             self.count_changes(before)
+            self.unchecked += len(batch) + len(removals)
         else:
             # Keep the changes and try again until the connection is back
             with self.lock:
                 self.pending.update(batch)
                 self.deleted.update(removals)
+        self.rest()
+
+    def check_after_burst(self):
+        """Mirror the folders that saw changes, to catch what the watcher missed.
+
+        When very many files change at once, the system's file watcher can skip
+        events, and a file can be deleted between being queued and being sent.
+        Either leaves the remote slightly off. So after a burst has settled,
+        every touched folder is compared with its remote copy: what is directly
+        inside it is sent or deleted as needed, exactly as a full sync would,
+        without descending into subfolders that were not touched.
+        """
+        with self.lock:
+            touched = set(self.touched_dirs)
+            self.touched_dirs.clear()
+        self.unchecked = 0
+        folders = set()
+        for rel in touched:
+            folder = self.root / rel
+            while not folder.is_dir() and folder != self.root:
+                folder = folder.parent  # gone: its parent no longer lists it, so mirror that
+            folders.add("./" if folder == self.root else f"{folder.relative_to(self.root)}/")
+        if not folders:
+            return
+        self.app.activate(self)
+        self.set_status("checking after a burst…", "busy")
+        before = CHANGES
+        with self.excludes() as exclude_file:
+            rc = sync_batch(sorted(folders), self.root, self.remote, rsync=self.rsync, quiet=self.offline,
+                            mirror_excludes=exclude_file, recursive=False)
+        if self.reached([rc]):
+            fixed = self.count_changes(before)
+            emit(f"checked {len(folders)} folder(s) after a burst: " + (f"{fixed} correction(s)" if fixed else "all in order"), "dim")
+        else:
+            with self.lock:
+                self.touched_dirs.update(touched)  # offline: check again once the connection is back
+            self.unchecked = BURST_PATHS
         self.rest()
 
     def check_connection(self, announce: bool):
@@ -1169,6 +1282,15 @@ class Project:
         if self.watching and now - self.last_flush >= (RETRY_SECONDS if self.offline else self.interval):
             self.last_flush = now
             self.flush()
+        quiet_for = time.monotonic() - self.last_event
+        if self.watching and not self.offline and not self.pending and not self.deleted:
+            if self.unchecked >= BURST_PATHS and quiet_for >= SETTLE_SECONDS:
+                self.check_after_burst()
+            elif self.unchecked and quiet_for >= FORGET_SECONDS:
+                # A few changes, long settled: the watcher is reliable at that pace
+                with self.lock:
+                    self.touched_dirs.clear()
+                self.unchecked = 0
         # Notice a dropped connection without waiting for the next change
         in_use = self.touched or self.watching
         if in_use and now - self.last_beat >= (RETRY_SECONDS if self.offline else HEARTBEAT_SECONDS):
@@ -1279,6 +1401,20 @@ class App:
             self.draw()
         else:
             print(text, flush=True)
+
+    def while_waiting(self, project: Project, seconds: float) -> bool:
+        """rsync is running for `project`: show for how long, allow scrolling, and cancel on Esc."""
+        base = project.panel.state.split("  ·  ")[0]
+        if seconds >= 3:
+            project.panel.state = f"{base}  ·  {int(seconds)}s, Esc cancels"
+            self.refresh(project)
+        cancel = False
+        while (key := self.screen.read_key(0)) is not None:
+            if key == "esc":
+                cancel = True
+            elif self.view is project and key in ("up", "down", "pageup", "pagedown", "home", "end"):
+                self.on_project_key(key)
+        return cancel
 
     def refresh(self, project: Project | None = None):
         """Redraw the fixed rows if what changed is visible."""

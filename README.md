@@ -20,6 +20,8 @@ xsync is now an interactive tool for SSH remotes. You run `xsync` in a terminal 
 - **No remote shell commands**: syncing, deleting and the reachability check all go through rsync, so odd filenames cannot inject commands and xsync works with an SSH key restricted to rsync (see "Restricting xsync to one remote folder").
 - **Stays inside the remote folder**: paths that are absolute or contain `..` are never synced or deleted, and a `remote` containing `..` is refused.
 - **`--delete` guard**: xsync refuses to start when the remote path is empty, `/`, `~`, `.` or a home directory. A missing trailing `/` on `remote` is added automatically.
+- **Keeps up with bursts**: after many changes at once, the touched folders are checked against the server, so nothing the file watcher missed is left behind.
+- **Never looks frozen**: a running sync shows its elapsed time and can be cancelled with Esc.
 - **Survives connection drops**: the server is checked once a minute, changes made while offline are queued and retried, and a dead connection is noticed instead of hanging.
 - **Watch mode cleans up**: deleted files are removed from the remote, and so are folders once they are empty there.
 - **Fail fast**: an unreachable SSH host (down, key not loaded, VPN off) shows as `OFFLINE` within seconds; xsync keeps running and retries.
@@ -473,6 +475,16 @@ Press `w`. xsync does a full sync and then sends changes as they happen, in batc
 - **Deleted files** are removed from the remote. A folder that disappears locally is removed too, but only once it is empty on the remote, so files that exist only on the server are never touched.
 - **Excluded paths** are ignored in both directions: changes to them are not sent, and they are never deleted on the remote.
 - **Switching watch off** stops sending. Switching it on again starts with a full sync, so nothing is missed. This is useful around a `git checkout` or a large refactor.
+- **After a burst** of 100 or more changes, such as a coding agent rewriting many files or a branch switch, xsync waits until things have been quiet for a few seconds and then checks the folders that were touched against the server, sending or deleting whatever does not match. When very many files change at once the system's file watcher can miss some, and this check catches them. You see it as `checked N folder(s) after a burst`.
+
+### While a sync runs
+
+xsync does one thing at a time, so keys other than the ones below wait until the running sync is done. After three seconds the status shows how long it has been running, for example `syncing…  ·  12s, Esc cancels`.
+
+- **Esc** cancels the running sync. In watch mode this also switches watch off for that project; switch it on again to catch up with a full sync.
+- **The scroll keys** keep working.
+
+A sync that seems stuck is usually waiting on the server: a full disk, a stalled network share, or a dropped connection that has not timed out yet.
 
 ### When the connection drops
 
@@ -517,6 +529,9 @@ The `remote` path is empty, `/`, or a home directory. Point it at a dedicated pr
 
 **"not found inside the project"**
 The file or folder entered with `f` does not exist, or is not inside the project root. `xsync` only syncs paths within the project.
+
+**xsync seems stuck on "syncing…"**
+It is waiting for rsync, which is waiting for the server. The status shows for how long. Press Esc to cancel, then check the server: free space on the share, the VPN, and `r` (reconnect) in the project.
 
 **Something is off and I don't know where to start**
 Open the project and press `i`. It shows the project, remote, rsync binary and flags in use, and whether the server answers.
