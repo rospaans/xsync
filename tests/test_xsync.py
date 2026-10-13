@@ -1,0 +1,315 @@
+"""Tests for xsync. Run with: python -m pytest tests"""
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+XSYNC_PATH = Path(__file__).resolve().parent.parent / "xsync"
+
+
+def load_xsync():
+    """Import the extensionless xsync script as a module."""
+    loader = importlib.machinery.SourceFileLoader("xsync", str(XSYNC_PATH))
+    spec = importlib.util.spec_from_loader("xsync", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+xsync = load_xsync()
+HOME = str(Path.home())
+
+
+# --- is_ssh_remote ---------------------------------------------------------
+
+@pytest.mark.parametrize("remote, expected", [
+    ("/Volumes/vol/project/", False),
+    ("~/project/", False),
+    ("./project/", False),
+    ("host:/path", True),
+    ("user@host:/path", True),
+])
+def test_is_ssh_remote(remote, expected):
+    assert xsync.is_ssh_remote(remote) is expected
+
+
+# --- make_excluded_checker -------------------------------------------------
+
+@pytest.mark.parametrize("path, expected", [
+    ("/repo/main.py", False),
+    ("/repo/src/main.py", False),
+    # file patterns
+    ("/repo/main.pyc", True),
+    ("/repo/src/main.pyc", True),
+    ("/repo/.DS_Store", True),
+    # directory patterns
+    ("/repo/.git/config", True),
+    ("/repo/data/table.csv", True),
+    # nested directories
+    ("/repo/src/data/deep/table.csv", True),
+    ("/repo/src/pkg/__pycache__/x.py", True),
+    # internal files
+    ("/repo/.xsync.files", True),
+    ("/repo/.xsync.exclude", True),
+    # outside the repo
+    ("/elsewhere/main.py", True),
+])
+def test_make_excluded_checker(path, expected):
+    patterns = [".git/", "data/", "__pycache__/", "*.pyc", ".DS_Store"]
+    is_excluded = xsync.make_excluded_checker(Path("/repo"), patterns)
+    assert is_excluded(path) is expected
+
+
+# --- remote rm command quoting ---------------------------------------------
+
+NASTY_NAMES = [
+    "plain.txt",
+    "with space.txt",
+    "it's.txt",
+    "$HOME.txt",
+    "a; touch pwned.txt",
+    "`touch pwned`.txt",
+    "-rf",
+]
+
+
+def test_rm_command_roundtrips_through_shell_parsing():
+    cmd = xsync.build_remote_rm_command("/srv/my project/", NASTY_NAMES)
+    argv = shlex.split(cmd)
+    assert argv[:3] == ["rm", "-f", "--"]
+    assert argv[3:] == [f"/srv/my project/{name}" for name in NASTY_NAMES]
+
+
+def test_rm_command_is_safe_when_run_by_a_real_shell(tmp_path):
+    base = tmp_path / "remote"
+    cwd = tmp_path / "cwd"
+    base.mkdir()
+    cwd.mkdir()
+    for name in NASTY_NAMES:
+        (base / name).write_text("x")
+    (base / "keep.txt").write_text("x")
+
+    cmd = xsync.build_remote_rm_command(str(base) + "/", NASTY_NAMES)
+    result = subprocess.run(["sh", "-c", cmd], cwd=cwd)
+
+    assert result.returncode == 0
+    assert [p.name for p in base.iterdir()] == ["keep.txt"]
+    assert list(cwd.iterdir()) == []  # nothing injected
+
+
+def test_rm_command_leading_dash_with_empty_base():
+    cmd = xsync.build_remote_rm_command("", ["-rf"])
+    assert shlex.split(cmd) == ["rm", "-f", "--", "./-rf"]
+
+
+def test_rm_command_keeps_tilde_expandable():
+    cmd = xsync.build_remote_rm_command("~/proj/", ["it's here.txt"])
+    assert cmd.startswith("rm -f -- ~/")
+    assert shlex.split(cmd)[3:] == ["~/proj/it's here.txt"]
+
+
+# --- --delete guard --------------------------------------------------------
+
+@pytest.mark.parametrize("remote", [
+    "",
+    "/",
+    "~",
+    "~/",
+    ".",
+    "./",
+    HOME,
+    HOME + "/",
+    "host:",
+    "host:/",
+    "host:~",
+    "host:~/",
+    "host:.",
+    "user@host:/",
+    f"host:{HOME}/",
+])
+def test_dangerous_remotes_are_rejected(remote):
+    assert xsync.unsafe_remote_reason(remote) is not None
+
+
+@pytest.mark.parametrize("remote", [
+    "host:/srv/project/",
+    "host:project/",
+    "user@host:~/project/",
+    "/Volumes/vol/project/",
+    "~/project/",
+    HOME + "/project",
+])
+def test_normal_remotes_pass(remote):
+    assert xsync.unsafe_remote_reason(remote) is None
+
+
+def test_normalize_remote():
+    assert xsync.normalize_remote("host:/srv/project") == "host:/srv/project/"
+    assert xsync.normalize_remote("host:~/project/") == "host:~/project/"
+    assert xsync.normalize_remote("/Volumes/vol/project") == "/Volumes/vol/project/"
+    assert xsync.normalize_remote("~/project") == HOME + "/project/"
+
+
+# --- rsync flags and flavor ------------------------------------------------
+
+def test_compression_only_over_ssh():
+    assert "z" in xsync.rsync_flags("host:/srv/project/")
+    assert "z" not in xsync.rsync_flags("/Volumes/vol/project/")
+
+
+@pytest.mark.parametrize("output, expected", [
+    ("rsync  version 3.2.7  protocol version 31\n", True),
+    ("rsync  version 2.6.9  protocol version 29\n", False),
+    ("openrsync: protocol version 29\nrsync version 2.6.9 compatible\n", False),
+    ("", False),
+])
+def test_is_gnu_rsync3(output, expected):
+    assert xsync.is_gnu_rsync3(output) is expected
+
+
+def test_resolve_rsync_prefers_config():
+    assert xsync.resolve_rsync({"rsync": "/custom/rsync"}) == "/custom/rsync"
+
+
+# --- end to end ------------------------------------------------------------
+
+EXCLUDES = [".xsync.toml", ".xsync.exclude", ".xsync.files", "ignored/"]
+
+needs_rsync = pytest.mark.skipif(
+    shutil.which(xsync.resolve_rsync({})) is None, reason="rsync not available"
+)
+
+
+def run_xsync(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "PYTHONUTF8": "1"}
+    return subprocess.run(
+        [sys.executable, str(XSYNC_PATH), *args],
+        cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8",
+    )
+
+
+def write_config(src: Path, remote: str):
+    (src / ".xsync.toml").write_text(
+        f"remote = {json.dumps(remote)}\nexclude = {json.dumps(EXCLUDES)}\n"
+    )
+
+
+def tree(root: Path) -> set[str]:
+    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.fixture
+def project(tmp_path):
+    """A source project with a few files, and an empty local destination."""
+    tmp_path = tmp_path.resolve()
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "sub").mkdir(parents=True)
+    (src / "ignored").mkdir()
+    dst.mkdir()
+    (src / "a.txt").write_text("a")
+    (src / "sub" / "b.txt").write_text("b")
+    (src / "ignored" / "c.txt").write_text("c")
+    write_config(src, str(dst) + "/")
+    return src, dst
+
+
+@needs_rsync
+def test_full_sync(project):
+    src, dst = project
+    result = run_xsync(src)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tree(dst) == {"a.txt", "sub/b.txt"}
+
+
+@needs_rsync
+def test_full_sync_from_subdirectory(project):
+    src, dst = project
+    result = run_xsync(src / "sub")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tree(dst) == {"a.txt", "sub/b.txt"}
+
+
+@needs_rsync
+def test_single_file_sync_into_missing_nested_folder(project):
+    src, dst = project
+    nested = src / "deep" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "f.py").write_text("print('hi')\n")
+
+    result = run_xsync(src, "deep/nested/f.py")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tree(dst) == {"deep/nested/f.py"}
+
+
+@needs_rsync
+def test_dry_run_changes_nothing(project):
+    src, dst = project
+    before = tree(src)
+
+    full = run_xsync(src, "--dry-run")
+    single = run_xsync(src, "sub/b.txt", "--dry-run")
+
+    assert full.returncode == 0, full.stdout + full.stderr
+    assert single.returncode == 0, single.stdout + single.stderr
+    assert tree(dst) == set()
+    assert tree(src) == before  # temp files cleaned up
+
+
+@needs_rsync
+def test_deletion_propagates(project):
+    src, dst = project
+    assert run_xsync(src).returncode == 0
+    (src / "a.txt").unlink()
+    assert run_xsync(src).returncode == 0
+    assert tree(dst) == {"sub/b.txt"}
+
+
+def test_delete_from_local_remote(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.txt").write_text("b")
+    (tmp_path / "keep.txt").write_text("k")
+    rc = xsync.delete_from_remote(["sub/b.txt", "missing.txt"], str(tmp_path) + "/")
+    assert rc == 0
+    assert tree(tmp_path) == {"keep.txt"}
+
+
+# --- optional: real SSH to localhost ---------------------------------------
+
+@pytest.fixture
+def ssh_localhost():
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "localhost", "true"]
+    try:
+        ok = subprocess.run(cmd, capture_output=True, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if not ok:
+        pytest.skip("ssh localhost is not available")
+
+
+@needs_rsync
+def test_ssh_sync_to_localhost(project, ssh_localhost):
+    src, dst = project
+    write_config(src, f"localhost:{dst}/")
+    remote = f"localhost:{dst}/"
+
+    result = run_xsync(src)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tree(dst) == {"a.txt", "sub/b.txt"}
+
+    nested = src / "deep" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "it's a file.py").write_text("x")
+    result = run_xsync(src, "deep/nested/it's a file.py")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "deep/nested/it's a file.py" in tree(dst)
+
+    assert xsync.delete_from_remote(["deep/nested/it's a file.py", "a.txt"], remote) == 0
+    assert tree(dst) == {"sub/b.txt"}

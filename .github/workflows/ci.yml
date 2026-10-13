@@ -33,6 +33,11 @@ jobs:
           sudo apt-get install -y shellcheck
           shellcheck install.sh
 
+      - name: Unit and end-to-end tests
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest tests -q
+
       - name: Smoke test --init, full sync, single-file dry-run
         shell: bash
         run: |
