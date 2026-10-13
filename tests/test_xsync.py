@@ -28,6 +28,33 @@ xsync = load_xsync()
 HOME = str(Path.home())
 
 
+# --- helpers ------------------------------------------------------------------
+
+EXCLUDES = [".xsync.toml", ".xsync.exclude", ".xsync.files", "ignored/"]
+
+needs_rsync = pytest.mark.skipif(
+    shutil.which(xsync.resolve_rsync({})) is None, reason="rsync not available"
+)
+
+
+def run_xsync(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "PYTHONUTF8": "1"}
+    return subprocess.run(
+        [sys.executable, str(XSYNC_PATH), *args],
+        cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8",
+    )
+
+
+def write_config(src: Path, remote: str, extra: str = ""):
+    (src / ".xsync.toml").write_text(
+        f"remote = {json.dumps(remote)}\nexclude = {json.dumps(EXCLUDES)}\n{extra}"
+    )
+
+
+def tree(root: Path) -> set[str]:
+    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+
+
 # --- is_ssh_remote ---------------------------------------------------------
 
 @pytest.mark.parametrize("remote, expected", [
@@ -116,6 +143,35 @@ def test_rm_command_keeps_tilde_expandable():
     assert shlex.split(cmd)[3:] == ["~/proj/it's here.txt"]
 
 
+# --- paths stay inside the remote project ----------------------------------
+
+def test_inside_remote_drops_escaping_paths():
+    rels = ["a.txt", "sub/b.txt", "../up.txt", "sub/../../up.txt", "/etc/passwd", ""]
+    assert xsync.inside_remote(rels) == ["a.txt", "sub/b.txt"]
+
+
+def test_delete_from_remote_cannot_reach_parent(tmp_path):
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    xsync.delete_from_remote(["../outside.txt", str(outside)], str(remote) + "/")
+    assert outside.exists()
+
+
+@needs_rsync
+def test_sync_batch_cannot_write_to_parent(tmp_path):
+    tmp_path = tmp_path.resolve()
+    src, remote = tmp_path / "work" / "src", tmp_path / "parent" / "remote"
+    src.mkdir(parents=True)
+    remote.mkdir(parents=True)
+    (src.parent / "up.txt").write_text("x")
+    (src / "a.txt").write_text("a")
+    rc = xsync.sync_batch(["../up.txt", "a.txt"], src, str(remote) + "/", rsync=[xsync.resolve_rsync({})])
+    assert rc == 0
+    assert tree(tmp_path / "parent") == {"remote/a.txt"}
+
+
 # --- --delete guard --------------------------------------------------------
 
 @pytest.mark.parametrize("remote", [
@@ -180,31 +236,6 @@ def test_resolve_rsync_prefers_config():
 
 
 # --- end to end ------------------------------------------------------------
-
-EXCLUDES = [".xsync.toml", ".xsync.exclude", ".xsync.files", "ignored/"]
-
-needs_rsync = pytest.mark.skipif(
-    shutil.which(xsync.resolve_rsync({})) is None, reason="rsync not available"
-)
-
-
-def run_xsync(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, "PYTHONUTF8": "1"}
-    return subprocess.run(
-        [sys.executable, str(XSYNC_PATH), *args],
-        cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8",
-    )
-
-
-def write_config(src: Path, remote: str, extra: str = ""):
-    (src / ".xsync.toml").write_text(
-        f"remote = {json.dumps(remote)}\nexclude = {json.dumps(EXCLUDES)}\n{extra}"
-    )
-
-
-def tree(root: Path) -> set[str]:
-    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
-
 
 @pytest.fixture
 def project(tmp_path):

@@ -296,6 +296,9 @@ def cmd_watch(repo_root: Path, remote: str, exclude_patterns: list[str], debounc
             if not event.is_directory:
                 # src is gone on remote; dest needs to be pushed
                 self._handle(event.dest_path)
+                # Excluded paths are never ours to delete on the remote
+                if is_excluded(event.src_path):
+                    return
                 try:
                     rel = str(Path(event.src_path).relative_to(repo_root))
                     with lock:
