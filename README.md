@@ -1,4 +1,4 @@
-# xsync
+<h1><img src="docs/xsync_logo.png" alt="xsync" width="320"></h1>
 
 [![CI](https://github.com/rospaans/xsync/actions/workflows/ci.yml/badge.svg)](https://github.com/rospaans/xsync/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -42,6 +42,10 @@ You run `xsync` in a terminal and press a key:
 - **Path** pushes one file, or mirrors one folder.
 
 xsync remembers your projects. Inside a project folder it opens that project; anywhere else it shows an overview of all of them, and watch mode keeps running for every project it is switched on for.
+
+A typical setup: a coding agent edits the project inside a devcontainer on your laptop, and xsync, running outside the container, mirrors every edit to the cluster within seconds. Jobs on the cluster use that copy together with data the agent can never reach.
+
+![Write locally, run on the cluster: the repo on the laptop is edited by a coding agent in a devcontainer, and xsync mirrors it one way over SSH to a project share on the cluster](docs/xsync_workflow.svg)
 
 ## Requirements
 
