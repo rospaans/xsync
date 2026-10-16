@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from xsync import config as config_module, update as update_module
+from xsync import app as app_module, config as config_module, update as update_module
 
 
 @pytest.mark.parametrize("newer, older", [("0.3.0", "0.2.0"), ("0.10.0", "0.9.9"), ("1.0", "0.99.1"), ("0.2.1", "0.2.0")])
@@ -17,6 +17,7 @@ def test_versions_compare_as_numbers(newer, older):
 def github(monkeypatch, tmp_path):
     """Pretend GitHub's main branch has the version this returns, and xsync was installed from a checkout."""
     monkeypatch.setattr(update_module, "__version__", "0.2.0")
+    monkeypatch.setattr(app_module, "__version__", "0.2.0")
     monkeypatch.setattr(update_module, "install_folder", lambda: "/opt/xsync-checkout")
     latest = {"version": None}
     monkeypatch.setattr(update_module, "latest_version", lambda: latest["version"])
@@ -83,7 +84,7 @@ def test_check_now_says_what_github_has(hub, github):
     github["version"] = "0.3.0"
     hub.on_settings_key("c")
     assert "0.3.0, newer than yours" in hub.screen.written[-1]
-    assert "a newer version is available" in hub.screen.written[-1]
+    assert "update available: 0.3.0" in hub.screen.written[-1]
     github["version"] = None
     hub.on_settings_key("c")
     assert "could not reach GitHub" in hub.screen.written[-1]
@@ -108,7 +109,20 @@ def test_settings_survive_a_broken_file(tmp_path):
     assert config_module.load_settings(path) == config_module.DEFAULT_SETTINGS
 
 
+def test_an_available_update_stands_out(hub, github):
+    github["version"] = "0.3.0"
+    hub.open_settings()
+    hub.on_settings_key("c")
+    screen = hub.screen.written[-1]
+    assert "Update available: xsync 0.3.0 (you have 0.2.0). Press u to update." in screen
+    assert hub.settings_panel.highlights == {"u"}
+    github["version"] = "0.2.0"
+    hub.on_settings_key("c")
+    assert "Update available" not in hub.screen.written[-1] and not hub.settings_panel.highlights
+
+
 def test_update_needs_a_typed_yes(hub, github, monkeypatch):
+    github["version"] = "0.3.0"
     ran = []
     monkeypatch.setattr(update_module, "why_not_update", lambda folder: None)
     monkeypatch.setattr(update_module, "run_update", lambda folder: ran.append(folder) or (True, ["done"]))
@@ -120,10 +134,40 @@ def test_update_needs_a_typed_yes(hub, github, monkeypatch):
     monkeypatch.setattr(hub, "ask", lambda label, text="": "yes")
     hub.on_settings_key("u")
     assert ran == ["/opt/xsync-checkout"]
-    assert "start xsync again" in hub.screen.written[-1]
+    assert "Updated to xsync 0.3.0. Quit (q) and start xsync again" in hub.screen.written[-1]
+    assert not hub.settings_panel.highlights
+
+
+def test_update_does_nothing_when_up_to_date_or_offline(hub, github, monkeypatch):
+    monkeypatch.setattr(update_module, "run_update", lambda folder: pytest.fail("pulled without a newer version"))
+    monkeypatch.setattr(hub, "ask", lambda label, text="": pytest.fail("asked without a newer version"))
+    hub.open_settings()
+    github["version"] = "0.2.0"
+    hub.on_settings_key("u")
+    assert "xsync 0.2.0 is up to date; nothing to update." in hub.screen.written[-1]
+    github["version"] = None
+    hub.on_settings_key("u")
+    assert "Could not reach GitHub" in hub.screen.written[-1]
+
+
+def test_update_is_not_run_twice(hub, github, monkeypatch):
+    """After an update, this xsync still runs the old version; u says to restart instead of pulling again."""
+    github["version"] = "0.3.0"
+    ran = []
+    monkeypatch.setattr(update_module, "why_not_update", lambda folder: None)
+    monkeypatch.setattr(update_module, "run_update", lambda folder: ran.append(folder) or (True, ["done"]))
+    monkeypatch.setattr(hub, "ask", lambda label, text="": "yes")
+    hub.open_settings()
+    hub.on_settings_key("u")
+    hub.on_settings_key("u")
+    assert len(ran) == 1
+    assert "Already updated to 0.3.0" in hub.screen.written[-1]
+    hub.on_settings_key("c")                                 # checking again does not bring the note back
+    assert hub.update_note == ""
 
 
 def test_update_refuses_when_it_is_not_safe(hub, github, monkeypatch):
+    github["version"] = "0.3.0"
     monkeypatch.setattr(update_module, "why_not_update", lambda folder: "it has uncommitted changes")
     monkeypatch.setattr(hub, "ask", lambda label, text="": pytest.fail("asked although it cannot update"))
     hub.open_settings()

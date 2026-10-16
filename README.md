@@ -421,12 +421,12 @@ Each row is a project: its name, where it syncs to, what it is doing, and how ma
 
 ### Settings and updates
 
-Press `,` in the overview. The settings screen shows your version, the checkout xsync was installed from, and the version on GitHub.
+Press `,` in the overview. The settings screen shows your version, the checkout xsync was installed from, and the version on GitHub. When a newer version is available, a yellow line at the top says so and the `u` button is green.
 
 | Key | Action |
 |---|---|
 | `c` | Check for updates: look on GitHub for a newer version now. |
-| `u` | Update: `git pull --ff-only` in the checkout xsync was installed from, then `bash install.sh`. You type `yes` first. Quit and start xsync again afterwards to use the new version. |
+| `u` | Update: checks GitHub first, and only when there is a newer version runs `git pull --ff-only` in the checkout xsync was installed from, then `bash install.sh`. You type `yes` first. Quit and start xsync again afterwards to use the new version. |
 | `a` | Check at start on or off. |
 | `b` | Back to the overview (Esc and `←` work too). |
 

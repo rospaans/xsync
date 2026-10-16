@@ -41,6 +41,7 @@ class App:
         self.in_settings = False  # the settings screen is shown (self.view is None meanwhile)
         self.settings_notes: list[str] = []  # lines under the settings, until the next key press
         self.latest: tuple[str | None, str] | None = None  # the version on GitHub, and when that was checked
+        self.updated_to = ""  # the version installed by u; it is used from the next start
         self.update_note = ""  # set from a background thread when GitHub has a newer version
         self._update_found = False
         self._drawn_rows = 0
@@ -193,8 +194,10 @@ class App:
             on_github = "not checked yet; press c"
         elif self.latest[0] is None:
             on_github = f"could not reach GitHub at {self.latest[1]}"
+        elif self.updated_to:
+            on_github = f"{self.latest[0]}, installed; quit and start xsync again to use it"
         elif update.is_newer(self.latest[0]):
-            on_github = f"{self.latest[0]}, newer than yours (checked {self.latest[1]}); press u to update"
+            on_github = f"{self.latest[0]}, newer than yours (checked {self.latest[1]})"
         else:
             on_github = f"{self.latest[0]}, you are up to date (checked {self.latest[1]})"
         at_start = "on" if self.settings["check_for_updates"] else "off"
@@ -209,15 +212,30 @@ class App:
         ]
         return [f"{label.ljust(10)} {value}" for label, value in rows]
 
+    def update_available(self) -> bool:
+        return self.latest is not None and update.is_newer(self.latest[0]) and not self.updated_to
+
     def draw_settings(self):
         size = self.screen.size()
         width = size.columns
         self._drawn_rows = 0
         panel = self.settings_panel
-        newer = self.latest is not None and update.is_newer(self.latest[0])
-        panel.state, panel.level = ("a newer version is available", "busy") if newer else (f"xsync {__version__}", "ok")
+        newer = self.update_available()
+        if self.updated_to:
+            panel.state, panel.level = f"updated to {self.updated_to}, restart to use it", "ok"
+        elif newer:
+            panel.state, panel.level = f"update available: {self.latest[0]}", "busy"
+        else:
+            panel.state, panel.level = f"xsync {__version__}", "ok"
         panel.switches = {"a": self.settings["check_for_updates"] and not update.check_disabled()}
+        panel.highlights = {"u"} if newer else set()
         body = [paint(f" {row}"[:max(width - 1, 0)], "dim") for row in self.settings_rows()]
+        if newer:
+            headline = f" ▲ Update available: xsync {self.latest[0]} (you have {__version__}). Press u to update."
+            body = [paint(headline[:max(width - 1, 0)], "yellow"), ""] + body
+        elif self.updated_to:
+            headline = f" ✓ Updated to xsync {self.updated_to}. Quit (q) and start xsync again to use it."
+            body = [paint(headline[:max(width - 1, 0)], "green"), ""] + body
         notes = [paint(f" {note}"[:max(width - 1, 0)], "dim") for note in self.settings_notes]
         rows = (panel.header_rows(width) + body + [""] + notes)[:size.lines]
         fixed = "".join(f"\033[{row};1H\033[2K{text}" for row, text in enumerate(rows, 1))
@@ -319,16 +337,30 @@ class App:
     def found_version(self, latest: str | None):
         """Remember what GitHub said; from the startup check's thread too, so nothing is drawn here."""
         self.latest = (latest, clock()[:5])
-        self.update_note = update.update_note(latest) or ""
+        self.update_note = "" if self.updated_to else update.update_note(latest) or ""
 
     def update_xsync(self):
-        """Pull the checkout xsync was installed from and reinstall, once the user typed yes."""
+        """Pull the checkout xsync was installed from and reinstall, once the user typed yes.
+
+        Only when GitHub has a newer version: up to date, or GitHub out of reach, changes nothing.
+        """
+        if self.updated_to:
+            self.settings_notes = [f"Already updated to {self.updated_to}. Quit (q) and start xsync again to use it."]
+            return
+        self.check_now()
+        latest = self.latest[0]
+        if latest is None:
+            self.settings_notes = ["Could not reach GitHub, so it is not known whether there is a newer version. Nothing was changed."]
+            return
+        if not update.is_newer(latest):
+            self.settings_notes = [f"xsync {__version__} is up to date; nothing to update."]
+            return
         folder = update.install_folder()
         problem = update.why_not_update(folder)
         if problem:
             self.settings_notes = [f"Not updating: {problem}"]
             return
-        answer = self.ask(f"git pull and reinstall from {folder}? type yes")
+        answer = self.ask(f"update xsync {__version__} to {latest}: git pull and reinstall from {folder}? type yes")
         if (answer or "").strip().lower() != "yes":
             self.settings_notes = ["Not updated."]
             return
@@ -338,8 +370,8 @@ class App:
         tail = lines[-12:]
         if ok:
             self.update_note = ""
-            self.latest = None
-            self.settings_notes = tail + ["", "Updated. Quit (q) and start xsync again to use the new version."]
+            self.updated_to = latest
+            self.settings_notes = tail
         else:
             self.settings_notes = tail + ["", "The update failed; nothing was changed in xsync as it runs now. See the lines above."]
 

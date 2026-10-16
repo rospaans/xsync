@@ -153,6 +153,7 @@ class Panel:
         self.keys = keys
         self.mode, self.state, self.level, self.detail = "idle", "starting…", "busy", ""
         self.switches: dict[str, bool] = {}   # on/off buttons, by key
+        self.highlights: set[str] = set()     # buttons to draw attention to, such as an update to install
         self.message, self.message_color = "", "dim"
 
     def bar(self, width: int, badge: tuple[str, str] | None = None) -> str:
@@ -214,6 +215,8 @@ class Panel:
                     cap = BUTTON_CAP_ON if self.switches[key] else BUTTON_CAP
                 elif key == "r" and self.mode == "offline":
                     cap = BUTTON_CAP_ALERT
+                elif key in self.highlights:
+                    cap = BUTTON_CAP_ON
                 text = (label if plain else f" {label}")[:label_width].ljust(label_width)
                 cell = [(f"[{key}] " if plain else f" {key} ", cap), (text, BUTTON_LABEL), (" " * BUTTON_GAP, "")]
                 if segments_length(segments) + segments_length(cell) > width:
