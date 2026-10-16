@@ -18,6 +18,7 @@ xsync remembers every project you run it in. The overview lists them all:
     ↑ ↓  move the highlight          a  add a folder (creates its .xsync.toml if missing)
     o    open the highlighted one    e  edit its .xsync.toml in your editor
     s w c  sync, watch on/off, compare it     x  forget it (no files are touched)
+    ,    settings: check for a newer xsync and update it
 
 Keys inside a project:
     s  sync the whole project          r  check the connection, send what was queued

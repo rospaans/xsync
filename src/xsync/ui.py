@@ -47,8 +47,26 @@ PROJECT_KEYS = [
 # Buttons in the overview; s, w and c act on the highlighted project
 OVERVIEW_KEYS = [
     [("o", "Open"), ("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("a", "Add")],
-    [("e", "Edit"), ("x", "Forget"), ("v", "Verbose"), ("h", "Help"), ("q", "Quit")],
+    [("e", "Edit"), ("x", "Forget"), ("v", "Verbose"), (",", "Settings"), ("h", "Help")],
+    [("q", "Quit")],
 ]
+
+
+# Buttons on the settings screen; u asks for confirmation before it changes anything
+SETTINGS_KEYS = [
+    [("c", "Check for updates"), ("u", "Update"), ("a", "Check at start"), ("b", "Back")],
+    [("h", "Help"), ("q", "Quit")],
+]
+
+
+SETTINGS_HELP = {
+    "c": "check GitHub for a newer version now",
+    "u": "update: git pull in the checkout xsync was installed from, then install.sh; asks you to type yes first",
+    "a": "check at start on/off: look for a newer version each time xsync starts",
+    "b": "back to the overview (Esc and ← work too)",
+    "h": "this help",
+    "q": "quit (Ctrl+C works too)",
+}
 
 
 KEY_HELP = {
@@ -78,6 +96,7 @@ OVERVIEW_HELP = {
     "e": "edit the highlighted project's .xsync.toml in your editor ($VISUAL, $EDITOR, or nano)",
     "x": "forget the highlighted project: it leaves this list, and no file anywhere is touched",
     "v": "verbose on/off: show rsync's raw output",
+    ",": "settings: check for a newer version of xsync, and update it",
     "h": "this help",
     "q": "quit (Ctrl+C works too)",
 }

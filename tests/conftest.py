@@ -12,8 +12,9 @@ from helpers import GNU_RSYNC, FakeScreen, Sandbox, make_project_folder
 
 
 @pytest.fixture(autouse=True)
-def fresh_state():
-    """Every test starts and ends with xsync's shared state as it is at startup."""
+def fresh_state(monkeypatch):
+    """Every test starts and ends with xsync's shared state as it is at startup, and never asks GitHub for updates."""
+    monkeypatch.setenv("XSYNC_NO_UPDATE_CHECK", "1")
     saved = (state.pretty, state.changes, dict(state.last_counts), state.force_colors)
     state.output = Printer()
     yield

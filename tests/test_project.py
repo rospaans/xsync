@@ -1,5 +1,6 @@
 """One project: loading its config, compare and sync, watch mode with the real file watcher."""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import pytest
 
 import xsync
 from xsync import config as config_module, project as project_module, remote as remote_module
-from helpers import EXCLUDES, REPO, RSYNC, fake_editor, make_project_folder, needs_gnu_rsync, needs_rsync, run_ticks, run_ticks_until, tree
+from helpers import EXCLUDES, REPO, RSYNC, fake_editor, make_project_folder, needs_gnu_rsync, needs_rsync, run_ticks, run_ticks_until, tree, write_config
 
 
 @pytest.mark.parametrize("config, expected", [
@@ -326,3 +327,117 @@ def test_nothing_of_xsync_itself_reaches_the_remote(hub, tmp_path, monkeypatch):
     assert tree(Path(project.remote)) == {".xsync.toml", "a.txt", "sub/b.txt"}
     assert tree(project.root) == {".xsync.toml", "a.txt", "sub/b.txt"}
     assert list(scratch.iterdir()) == []
+
+
+def test_an_exclude_added_while_watching_applies_at_once(hub, monkeypatch):
+    """Editing .xsync.toml in another editor is noticed; watch mode stays on when the remote is unchanged."""
+    monkeypatch.setattr(project_module, "CONFIG_SETTLE_SECONDS", 0)
+    project = hub.projects[0]
+    project.observer = object()                              # as if watching
+    project.pending.update({"a.txt", "checkpoints/big.pt"})
+    config = project.root / ".xsync.toml"
+    config.write_text(config.read_text().replace('exclude = [', 'exclude = ["checkpoints/", '))
+    project.tick(time.monotonic())
+    assert project.watching and project.error == ""
+    assert project.is_excluded(str(project.root / "deep" / "checkpoints" / "w.bin"))
+    assert project.pending == {"a.txt"}                     # the newly excluded path is no longer queued
+    assert any("config changed on disk" in line and "still watching" in line for line in project.log)
+    assert any("now excluded: checkpoints/" in line for line in project.log)
+    project.tick(time.monotonic())                          # read once, not on every tick
+    assert sum("config changed" in line for line in project.log) == 1
+    project.observer = None
+
+
+def test_a_new_remote_on_disk_switches_watch_off(hub, monkeypatch):
+    monkeypatch.setattr(project_module, "CONFIG_SETTLE_SECONDS", 0)
+    project = hub.projects[0]
+    watcher = project.observer = type("Observer", (), {"stop": lambda self: None, "join": lambda self: None})()
+    write_config(project.root, "host:somewhere/else/")
+    project.tick(time.monotonic())
+    assert project.observer is not watcher and not project.watching
+    assert project.remote == "host:somewhere/else/"
+    assert any("watch mode was switched off" in line for line in project.log)
+
+
+def test_a_config_still_being_saved_is_read_later(hub):
+    project = hub.projects[0]
+    write_config(project.root, "host:somewhere/else/")       # just now: give the editor a moment
+    project.tick(time.monotonic())
+    assert project.remote != "host:somewhere/else/"
+
+
+@needs_gnu_rsync
+def test_a_file_still_being_written_is_held_back(hub, monkeypatch):
+    project = hub.projects[0]
+    dst = Path(project.remote)
+    project.observer = object()
+    growing = project.root / "download.tar.gz"
+    growing.write_text("part 1")
+    project.pending.add("download.tar.gz")
+    project.flush()
+    assert (dst / "download.tar.gz").read_text() == "part 1"   # the first change goes out at once
+
+    project.pending.add("download.tar.gz")                   # a late event for the same version
+    project.flush()
+    assert project.pending == set() and not project.held_since
+
+    with growing.open("a") as f:
+        f.write(", part 2")
+    project.pending.add("download.tar.gz")
+    project.flush()
+    assert (dst / "download.tar.gz").read_text() == "part 1"   # changed again right away: wait
+    assert project.pending == {"download.tar.gz"} and "still being written" in project.panel.state
+    assert any("still being written" in line for line in project.log)
+
+    old = time.time() - 10                                    # then nothing for a while
+    os.utime(growing, (old, old))
+    project.flush()
+    assert (dst / "download.tar.gz").read_text() == "part 1, part 2"
+    assert project.pending == set() and not project.held_since and project.panel.state == project_module.IDLE
+    project.observer = None
+
+
+@needs_gnu_rsync
+def test_a_file_that_never_stops_changing_is_still_sent(hub, monkeypatch):
+    project = hub.projects[0]
+    project.observer = object()
+    log = project.root / "train.log"
+    log.write_text("step 1")
+    project.pending.add("train.log")
+    project.flush()
+    log.write_text("step 1, step 2")
+    project.pending.add("train.log")
+    project.flush()
+    assert project.held_since
+    project.held_since["train.log"] -= project_module.MAX_HOLD_SECONDS
+    project.flush()
+    assert (Path(project.remote) / "train.log").read_text() == "step 1, step 2"
+    project.observer = None
+
+
+def test_editing_with_e_switches_watch_off_even_if_the_remote_is_unchanged(hub, tmp_path, monkeypatch):
+    project = hub.projects[0]
+    fake_editor(tmp_path, monkeypatch, None)                 # saved without changes
+    project.observer = type("Observer", (), {"stop": lambda self: None, "join": lambda self: None})()
+    hub.on_overview_key("e")
+    assert not project.watching
+    assert any("watch mode was switched off" in line for line in project.log)
+
+
+@needs_gnu_rsync
+def test_saving_again_a_few_seconds_later_is_sent_at_once(hub):
+    """Only a file that changed again by the very next batch counts as still being written."""
+    project = hub.projects[0]
+    project.observer = object()
+    notes = project.root / "notes.txt"
+    notes.write_text("first save")
+    project.pending.add("notes.txt")
+    project.flush()
+    when, stamp = project.sent_at["notes.txt"]
+    project.sent_at["notes.txt"] = (when - project.interval - 3, stamp)   # as if sent a while ago
+    notes.write_text("second save, a few seconds later")
+    project.pending.add("notes.txt")
+    project.flush()
+    assert (Path(project.remote) / "notes.txt").read_text() == "second save, a few seconds later"
+    assert not project.held_since and not any("still being written" in line for line in project.log)
+    project.observer = None

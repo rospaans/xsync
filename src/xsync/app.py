@@ -4,16 +4,18 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 from . import __version__
-from .config import STARTER_CONFIG, clean_path, find_root, load_registry, save_registry
-from .output import Printer, emit, paint, state, warn
+from .config import STARTER_CONFIG, clean_path, find_root, load_registry, load_settings, save_registry, save_settings
+from .output import Printer, clock, emit, paint, state, warn
 from .project import Project
+from . import update
 from .ui import (
-    BAR_DOT, BAR_TAG, BAR_TRANSPORT, KEY_HELP, OVERVIEW_HELP, OVERVIEW_KEYS, ROW_SELECTED, Panel, Screen,
-    segments_length, spread, styled,
+    BAR_DOT, BAR_TAG, BAR_TRANSPORT, KEY_HELP, OVERVIEW_HELP, OVERVIEW_KEYS, ROW_SELECTED, SETTINGS_HELP,
+    SETTINGS_KEYS, Panel, Screen, segments_length, spread, styled,
 )
 
 
@@ -33,6 +35,14 @@ class App:
         self.selected = 0
         self.panel = Panel("", OVERVIEW_KEYS)
         self.notes: list[str] = []  # lines under the overview table, until the next key press
+        self.settings_file = registry.parent / "settings.toml"
+        self.settings = load_settings(self.settings_file)
+        self.settings_panel = Panel("settings", SETTINGS_KEYS)
+        self.in_settings = False  # the settings screen is shown (self.view is None meanwhile)
+        self.settings_notes: list[str] = []  # lines under the settings, until the next key press
+        self.latest: tuple[str | None, str] | None = None  # the version on GitHub, and when that was checked
+        self.update_note = ""  # set from a background thread when GitHub has a newer version
+        self._update_found = False
         self._drawn_rows = 0
         self._list_height = 0  # rows of a project's list that fit on screen
         self._resized = False  # set by the resize signal; the redraw happens in the loop
@@ -115,7 +125,9 @@ class App:
             self.draw()
 
     def draw(self, clear: bool = False):
-        if self.view is None:
+        if self.in_settings:
+            self.draw_settings()
+        elif self.view is None:
             self.draw_overview()
         else:
             self.draw_project(clear)
@@ -166,11 +178,51 @@ class App:
         self._drawn_rows = 0  # the next project view starts from a cleared screen
         self.summarize()
         notes = [paint(f" {note}"[:max(width - 1, 0)], "dim") for note in self.notes]
+        if self.update_note:
+            notes.append(paint(f" {self.update_note}"[:max(width - 1, 0)], "yellow"))
         rows = (self.panel.header_rows(width) + self.table_rows(width) + [""] + notes)[:size.lines]
         fixed = "".join(f"\033[{row};1H\033[2K{text}" for row, text in enumerate(rows, 1))
         below = f"\033[{len(rows) + 1};1H\033[J" if len(rows) < size.lines else ""
         title = f"\033]0;xsync: {self.panel.state}\007"
         self.screen.write(f"\033[r{fixed}{below}{title}")
+
+    def settings_rows(self) -> list[str]:
+        """What the settings screen lists: versions, where xsync came from, and the update check."""
+        folder = update.install_folder()
+        if self.latest is None:
+            on_github = "not checked yet; press c"
+        elif self.latest[0] is None:
+            on_github = f"could not reach GitHub at {self.latest[1]}"
+        elif update.is_newer(self.latest[0]):
+            on_github = f"{self.latest[0]}, newer than yours (checked {self.latest[1]}); press u to update"
+        else:
+            on_github = f"{self.latest[0]}, you are up to date (checked {self.latest[1]})"
+        at_start = "on" if self.settings["check_for_updates"] else "off"
+        if update.check_disabled():
+            at_start = f"off: {update.OPT_OUT} is set"
+        rows = [
+            ("version", f"xsync {__version__}"),
+            ("installed", f"from {folder}" if folder else "not from a checkout, so it cannot update itself"),
+            ("on GitHub", on_github),
+            ("at start", f"check for a newer version: {at_start}"),
+            ("settings", str(self.settings_file)),
+        ]
+        return [f"{label.ljust(10)} {value}" for label, value in rows]
+
+    def draw_settings(self):
+        size = self.screen.size()
+        width = size.columns
+        self._drawn_rows = 0
+        panel = self.settings_panel
+        newer = self.latest is not None and update.is_newer(self.latest[0])
+        panel.state, panel.level = ("a newer version is available", "busy") if newer else (f"xsync {__version__}", "ok")
+        panel.switches = {"a": self.settings["check_for_updates"] and not update.check_disabled()}
+        body = [paint(f" {row}"[:max(width - 1, 0)], "dim") for row in self.settings_rows()]
+        notes = [paint(f" {note}"[:max(width - 1, 0)], "dim") for note in self.settings_notes]
+        rows = (panel.header_rows(width) + body + [""] + notes)[:size.lines]
+        fixed = "".join(f"\033[{row};1H\033[2K{text}" for row, text in enumerate(rows, 1))
+        below = f"\033[{len(rows) + 1};1H\033[J" if len(rows) < size.lines else ""
+        self.screen.write(f"\033[r{fixed}{below}\033]0;xsync: settings\007")
 
     def draw_project(self, clear: bool = False):
         """The fixed rows of the project on screen; its list scrolls in the region below them."""
@@ -214,7 +266,7 @@ class App:
 
     def ask(self, label: str, text: str = "") -> str | None:
         """Read a line of text on the message row, starting from `text`. Returns None if cancelled with Esc."""
-        panel = self.view.panel if self.view else self.panel
+        panel = self.view.panel if self.view else self.settings_panel if self.in_settings else self.panel
         previous = (panel.message, panel.message_color)
         while True:
             panel.message, panel.message_color = f"{label}: {text}▏   Enter to confirm, Esc to cancel", "bold"
@@ -247,6 +299,64 @@ class App:
 
     def back(self):
         self.view = None
+        self.in_settings = False
+        self.draw()
+
+    # --- settings
+
+    def open_settings(self):
+        self.in_settings = True
+        self.notes = []
+        self.settings_notes = []
+        self.draw()
+
+    def check_now(self):
+        self.settings_notes = ["checking GitHub…"]
+        self.draw()
+        self.found_version(update.latest_version())
+        self.settings_notes = [] if self.latest[0] else ["no answer from GitHub; is this computer online?"]
+
+    def found_version(self, latest: str | None):
+        """Remember what GitHub said; from the startup check's thread too, so nothing is drawn here."""
+        self.latest = (latest, clock()[:5])
+        self.update_note = update.update_note(latest) or ""
+
+    def update_xsync(self):
+        """Pull the checkout xsync was installed from and reinstall, once the user typed yes."""
+        folder = update.install_folder()
+        problem = update.why_not_update(folder)
+        if problem:
+            self.settings_notes = [f"Not updating: {problem}"]
+            return
+        answer = self.ask(f"git pull and reinstall from {folder}? type yes")
+        if (answer or "").strip().lower() != "yes":
+            self.settings_notes = ["Not updated."]
+            return
+        self.settings_notes = [f"updating from {folder}…"]
+        self.draw()
+        ok, lines = update.run_update(folder)
+        tail = lines[-12:]
+        if ok:
+            self.update_note = ""
+            self.latest = None
+            self.settings_notes = tail + ["", "Updated. Quit (q) and start xsync again to use the new version."]
+        else:
+            self.settings_notes = tail + ["", "The update failed; nothing was changed in xsync as it runs now. See the lines above."]
+
+    def on_settings_key(self, key: str):
+        self.settings_notes = []
+        if key in ("b", "esc", "left"):
+            self.back()
+            return
+        if key == "c":
+            self.check_now()
+        elif key == "u":
+            self.update_xsync()
+        elif key == "a":
+            self.settings["check_for_updates"] = not self.settings["check_for_updates"]
+            save_settings(self.settings_file, self.settings)
+        elif key == "h":
+            self.settings_notes = [f"{keys.ljust(5)} {text}" for keys, text in SETTINGS_HELP.items()]
         self.draw()
 
     def toggle_verbose(self) -> str:
@@ -307,6 +417,9 @@ class App:
             self.notes = [self.toggle_verbose()]
         elif key == "h":
             self.notes = [f"xsync {__version__}"] + [f"{keys.ljust(5)} {text}" for keys, text in OVERVIEW_HELP.items()]
+        elif key == ",":
+            self.open_settings()
+            return
         elif project is None:
             pass
         elif key == "x":
@@ -379,8 +492,22 @@ class App:
                 else:
                     actions[key]()
 
+    def check_for_update(self):
+        """Look for a newer version on GitHub without holding up the screen; runs in its own thread."""
+        self.found_version(update.latest_version())
+        self._update_found = True  # the loop redraws; drawing from this thread could garble the screen
+
+    def start_update_check(self) -> threading.Thread | None:
+        """Check for a newer version in the background, unless that is switched off."""
+        if not self.settings["check_for_updates"] or update.check_disabled():
+            return None
+        thread = threading.Thread(target=self.check_for_update, daemon=True)
+        thread.start()
+        return thread
+
     def run(self):
         """Show the overview and handle keys until quit."""
+        self.start_update_check()
         try:
             with self.screen:
                 if hasattr(signal, "SIGWINCH"):
@@ -390,10 +517,16 @@ class App:
                 while True:
                     key = self.screen.read_key(0.2)
                     self.after_resize()
+                    if self._update_found:
+                        self._update_found = False
+                        if self.view is None:
+                            self.draw()  # the overview or the settings, both show it
                     if key == "q":
                         break
                     if key is not None:
-                        if self.view is None:
+                        if self.in_settings:
+                            self.on_settings_key(key)
+                        elif self.view is None:
                             self.on_overview_key(key)
                         else:
                             self.on_project_key(key)

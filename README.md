@@ -69,7 +69,7 @@ The installer:
 - installs xsync and `watchdog` (used by watch mode) into it;
 - links the `xsync` command into `~/.local/bin` and, if needed, adds that folder to your `PATH` in `~/.zshrc` or `~/.bashrc`. Restart your shell or `source` the rc file afterwards.
 
-To update, pull the changes and run `bash install.sh` again.
+To update, pull the changes and run `bash install.sh` again. Or let xsync do it: press `,` in the overview for the settings, then `u` (see [Settings and updates](#settings-and-updates)).
 
 If you manage Python tools yourself, `pipx install '.[watch]'` or `uv tool install '.[watch]'` from the checkout does the same.
 
@@ -278,7 +278,7 @@ exclude = [
 | Setting | Required | Meaning |
 |---|---|---|
 | `remote` | yes | Where to sync to. |
-| `exclude` | no | Files and folders to skip. |
+| `exclude` | no | Files and folders to skip, in rsync's pattern syntax. `checkpoints/` skips every folder of that name, at any depth; `/checkpoints/` only the one at the top of the project. |
 | `interval` | no | Seconds watch mode collects changes before sending them. Default 2. |
 | `rsync_args` | no | A list of extra flags passed to rsync, placed after xsync's own so they can override them. |
 
@@ -383,12 +383,13 @@ xsync remembers each project the first time you run it there (it walks up from t
    X S Y N C     3 projects                                                         ● 2 watching    49 changes
 
   o  Open           s  Sync           w  Watch          c  Compare        a  Add
-  e  Edit           x  Forget         v  Verbose off    h  Help           q  Quit
+  e  Edit           x  Forget         v  Verbose off    ,  Settings       h  Help
+  q  Quit
 
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
- › my_project        SSH  myhost:projects/my_project/           ● in sync, watching for changes    7 changes
-   thesis_figures    SSH  myhost:projects/thesis_figures/                            ● 3 differences at 15:20
-   data_pipeline     SSH  myhost:projects/data_pipeline/                            ● syncing…    42 changes
+   data_pipeline    SSH  myhost:projects/data_pipeline/                             ● syncing…    42 changes
+ › my_project       SSH  myhost:projects/my_project/            ● in sync, watching for changes    7 changes
+   web_app          SSH  myhost:projects/web_app/                                    ● 3 differences at 15:20
 ```
 
 Each row is a project: its name, where it syncs to, what it is doing, and how many changes it has sent. The rows are in alphabetical order, and `›` marks the highlighted one.
@@ -404,6 +405,7 @@ Each row is a project: its name, where it syncs to, what it is doing, and how ma
 | `e` | Edit the highlighted project's `.xsync.toml` in your editor. When you close the editor, xsync reads the file again. |
 | `x` | Forget the highlighted project: it leaves this list and stops being watched. No file is touched, locally or on the server, and `a` adds it back. |
 | `v` | Verbose on or off, for all projects. |
+| `,` | Settings: check for a newer version of xsync and update it. |
 | `h` | Help. |
 | `q` | Quit. Ctrl+C works too. |
 
@@ -411,9 +413,28 @@ Each row is a project: its name, where it syncs to, what it is doing, and how ma
 
 **A project that cannot be synced** (its folder is gone, the config is invalid, `remote` is unsafe or still the starter placeholder) stays in the list with the reason in place of its state, until you fix it with `e` or forget it with `x`.
 
-**The editor** is `$VISUAL`, else `$EDITOR`, else `nano`. Editing a project's config switches its watch mode off; switch it on again afterwards.
+**The editor** is `$VISUAL`, else `$EDITOR`, else `nano`. Editing a project's config with `e` switches its watch mode off; switch it on again afterwards.
+
+**A config saved from another editor** (VS Code, say) is noticed too: xsync reads it again within a second or two. Watch mode then stays on when `remote` and the rsync settings are unchanged, so a new `exclude` entry or `interval` applies at once. If `remote`, `rsync` or `rsync_args` changed, watch mode is switched off.
 
 **Where the list is kept:** `~/.config/xsync/projects.toml` (or under `$XDG_CONFIG_HOME`). It only holds folder paths and is managed by xsync.
+
+### Settings and updates
+
+Press `,` in the overview. The settings screen shows your version, the checkout xsync was installed from, and the version on GitHub.
+
+| Key | Action |
+|---|---|
+| `c` | Check for updates: look on GitHub for a newer version now. |
+| `u` | Update: `git pull --ff-only` in the checkout xsync was installed from, then `bash install.sh`. You type `yes` first. Quit and start xsync again afterwards to use the new version. |
+| `a` | Check at start on or off. |
+| `b` | Back to the overview (Esc and `←` work too). |
+
+**Check at start** (on by default): each time xsync starts, it looks up the version on GitHub's `main` branch in the background. If that is newer than yours, the overview shows a yellow line saying so. Nothing else is sent. Setting `XSYNC_NO_UPDATE_CHECK=1` switches it off too, whatever the setting says. The setting is kept in `~/.config/xsync/settings.toml`.
+
+**Update** only works on a checkout that is on `main` and has no uncommitted changes. Anything else (your own branch, local edits) is left alone, and xsync says why. If the pull cannot fast-forward, nothing is installed.
+
+A "newer version" means a higher `__version__` in `src/xsync/__init__.py`, so raise it with every change worth installing.
 
 ### A project
 
@@ -445,7 +466,7 @@ The top of the screen stays fixed; changes scroll below it. On a narrow terminal
 | `b` | Back to the overview of all projects (Esc and `←` work too). The project keeps watching if watch mode is on. |
 | `i` | Info: the version, project, config file, remote, whether the host answers, and the rsync and flags in use. |
 | `p` | Problems: list the warnings and errors recorded so far, and clear the problem line. |
-| `e` | Edit this project's `.xsync.toml` in your editor; xsync reads it again when you close the editor. |
+| `e` | Edit this project's `.xsync.toml` in your editor; xsync reads it again when you close the editor, with watch mode switched off. A save from another editor is picked up as well, and keeps watch mode on (see above). |
 | `l` | Clear this project's list. Nothing else changes. |
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Scroll back through the list. The mouse wheel works too in most terminals. |
 | `v` | Verbose on or off: show rsync's raw output in place of the one-line-per-change list. |
@@ -488,7 +509,8 @@ Press `w`. xsync does a full sync and then sends changes as they happen, in batc
 ```
 
 - **Deleted files** are removed from the remote. A folder that disappears locally is removed too, but only once it is empty on the remote, so files that exist only on the server are never touched.
-- **Excluded paths** are ignored in both directions: changes to them are not sent, and they are never deleted on the remote.
+- **Excluded paths** are ignored in both directions: changes to them are not sent, and they are never deleted on the remote. A path you add to `exclude` while watching is skipped from then on, but copies already on the remote stay there; xsync lists the new patterns as a reminder, and removing those copies is up to you.
+- **Files still being written**, such as a download or a growing log, are not sent over and over. A file that has changed again by the very next batch after it was sent waits until it has been unchanged for 3 seconds (the status says `waiting for N file(s) still being written`). One that never stops changing is still sent once a minute. A file you save again a few seconds later is sent right away.
 - **Switching watch off** stops sending. Switching it on again starts with a full sync, so nothing is missed. This is useful around a `git checkout` or a large refactor.
 - **After a burst** of 100 or more changes, such as a coding agent rewriting many files or a branch switch, xsync waits until things have been quiet for a few seconds and then checks the folders that were touched against the server, sending or deleting whatever does not match. When very many files change at once the system's file watcher can miss some, and this check catches them. You see it as `checked N folder(s) after a burst`.
 
@@ -600,7 +622,8 @@ The code is in `src/xsync/`:
 | `rsync.py` | Everything that runs rsync: full syncs, single paths, watch-mode batches and deletes, and reading rsync's output. |
 | `remote.py` | The `remote` setting: telling SSH targets from local paths, and refusing dangerous ones. |
 | `excludes.py` | The exclude check watch mode uses, matching rsync's patterns. |
-| `config.py` | The starter config, finding a project's folder, and the list of known projects. |
+| `config.py` | The starter config, finding a project's folder, the list of known projects, and xsync's own settings. |
+| `update.py` | Checking GitHub for a newer version, and updating from the checkout xsync was installed from. |
 | `ui.py` | Drawing the fixed rows of a view, and reading keys from the terminal. |
 | `output.py` | The small shared state, colors, and the lines that end up in a project's list. |
 

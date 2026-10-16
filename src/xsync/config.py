@@ -156,3 +156,24 @@ def clean_path(text: str) -> str:
     except ValueError:
         parts = []
     return os.path.expanduser(parts[0] if len(parts) == 1 else text)
+
+
+# xsync's own settings, kept next to the list of projects
+DEFAULT_SETTINGS = {"check_for_updates": True}
+
+
+def load_settings(path: Path) -> dict:
+    try:
+        with open(path, "rb") as f:
+            stored = tomllib.load(f)
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
+        stored = {}
+    return {key: stored.get(key, default) if isinstance(stored.get(key), type(default)) else default
+            for key, default in DEFAULT_SETTINGS.items()}
+
+
+def save_settings(path: Path, settings: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# xsync's settings. Managed by xsync: change them with the , key in the overview."]
+    lines += [f"{key} = {json.dumps(value)}" for key, value in settings.items()]
+    path.write_text("\n".join(lines) + "\n")

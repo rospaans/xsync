@@ -62,11 +62,11 @@ def overview() -> list[str]:
     work = Path(tempfile.mkdtemp())
     try:
         app = App(work / "projects.toml", screen=FakeScreen())
-        for name in ("my_project", "thesis_figures", "data_pipeline"):
+        for name in ("my_project", "web_app", "data_pipeline"):
             (work / name).mkdir()
             (work / name / ".xsync.toml").write_text(f'remote = "myhost:projects/{name}/"\n')
             app.register(work / name)
-        states = {"my_project": (IDLE, "ok", 7), "thesis_figures": ("3 differences at 15:20", "busy", 0),
+        states = {"my_project": (IDLE, "ok", 7), "web_app": ("3 differences at 15:20", "busy", 0),
                   "data_pipeline": ("syncing…", "busy", 42)}
         for project in app.projects:
             project.panel.state, project.panel.level, project.changes = states[project.name]

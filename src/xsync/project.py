@@ -32,6 +32,18 @@ FORGET_SECONDS = 30
 # For this long after a burst, any further change is followed by another check: the tail of a
 # burst arrives in small batches, and those are as likely to have been reported incompletely
 BURST_WINDOW_SECONDS = 60
+# A file that has changed again by the very next batch after it was sent (within the interval
+# plus REWRITE_GRACE_SECONDS of the send finishing) is still being written: a download, a
+# growing log. It waits until it has been unchanged for STEADY_SECONDS, but never longer than
+# MAX_HOLD_SECONDS, so a file that never stops changing still goes out. Saving a file again
+# a few seconds later is not that, and is sent at once.
+REWRITE_GRACE_SECONDS = 1.5
+# How long to remember what was sent, to skip late events for a version already sent
+SENT_MEMORY_SECONDS = 60
+STEADY_SECONDS = 3
+MAX_HOLD_SECONDS = 60
+# An edit to .xsync.toml is read once the file has been left alone this long, not halfway through a save
+CONFIG_SETTLE_SECONDS = 1
 IDLE = "in sync, watching for changes"
 # Lines of history kept per project, so its list can be shown again after looking elsewhere
 LOG_LINES = 2000
@@ -67,6 +79,10 @@ class Project:
         self.burst_at = float("-inf")  # when the last burst was seen
         self.last_event = time.monotonic()
         self.last_flush = self.last_beat = time.monotonic()
+        # Files still being written: when each was last sent, and since when each is held back
+        self.sent_at: dict[str, tuple[float, tuple]] = {}
+        self.held_since: dict[str, float] = {}
+        self.config_stamp = None  # .xsync.toml as last read, to notice edits made outside xsync
         self.error = ""  # why this project cannot be synced, if it cannot
         self.config: dict = {}
         self.remote = ""
@@ -81,6 +97,7 @@ class Project:
 
     def load(self):
         """Read .xsync.toml and work out how this project syncs; sets self.error if it cannot."""
+        self.config_stamp = self.read_config_stamp()
         problem = self._load()
         self.error = problem or ""
         self.panel.remote = self.remote
@@ -89,18 +106,58 @@ class Project:
         self.panel.detail = self.detail()
         self.sync_switches()
 
-    def reload(self):
-        """Read the config again after it was edited. Watch mode is switched off first."""
+    def reload(self, reason: str = "config reloaded", keep_watching: bool = False):
+        """Read the config again after it was edited. Watch mode is switched off first.
+
+        With keep_watching (an edit saved outside xsync, see check_config), watch
+        mode stays on if the remote and the rsync command are unchanged, so an
+        edit to the exclude list or the interval takes effect right away.
+        """
         self.app.activate(self)
         was_watching = self.watching
-        self.close()
-        self.offline = False
+        before = (self.remote, self.rsync)
+        old_excludes = self.exclude_patterns
         self.remote = ""
         self.load()
-        emit("config reloaded" + ("; watch mode was switched off" if was_watching else ""), "dim")
+        keep_watching = keep_watching and was_watching and not self.error and (self.remote, self.rsync) == before
+        if keep_watching:
+            self.drop_excluded()
+        else:
+            self.close()
+            self.offline = False
+        note = "; still watching" if keep_watching else "; watch mode was switched off" if was_watching else ""
+        emit(reason + note, "dim")
         if self.error:
             warn(self.error, "magenta")
+        added = [pattern for pattern in self.exclude_patterns if pattern not in old_excludes]
+        if added and not self.error:
+            emit(f"now excluded: {', '.join(added)}. Copies already on the remote are left there; "
+                 "remove them on the server if they are not needed.", "dim")
         self.rest()
+
+    def read_config_stamp(self):
+        """When .xsync.toml was last changed, and its size; None if it cannot be read."""
+        try:
+            info = (self.root / ".xsync.toml").stat()
+        except OSError:
+            return None
+        return info.st_mtime_ns, info.st_size
+
+    def check_config(self):
+        """Reload .xsync.toml if it was changed outside xsync, for example in another editor."""
+        stamp = self.read_config_stamp()
+        if stamp == self.config_stamp:
+            return
+        if stamp is not None and time.time() - stamp[0] / 1e9 < CONFIG_SETTLE_SECONDS:
+            return  # possibly still being saved
+        self.reload("config changed on disk, reloaded", keep_watching=True)
+
+    def drop_excluded(self):
+        """Forget queued paths that the exclude list now covers."""
+        with self.lock:
+            self.pending = {rel for rel in self.pending if not self.is_excluded(str(self.root / rel))}
+            self.deleted = {rel for rel in self.deleted if not self.is_excluded(str(self.root / rel))}
+        self.held_since = {rel: since for rel, since in self.held_since.items() if rel in self.pending}
 
     def _load(self) -> str | None:
         if not self.root.is_dir():
@@ -188,6 +245,8 @@ class Project:
         elif self.offline:
             queued = len(self.pending) + len(self.deleted)
             self.set_status(f"offline, {queued} queued, retrying", "problem", "offline")
+        elif self.watching and self.held_since:
+            self.set_status(f"waiting for {len(self.held_since)} file(s) still being written", "busy", "watch")
         elif self.watching:
             self.set_status(IDLE, "ok", "watch")
         else:
@@ -378,6 +437,46 @@ class Project:
             self.touched_dirs.clear()
         self.unchecked = 0
         self.burst_at = float("-inf")
+        self.sent_at.clear()
+        self.held_since.clear()
+
+    def hold_back_changing(self, batch: list[str]) -> tuple[list[str], list[str], dict[str, tuple]]:
+        """Split a batch into files to send now and files still being written.
+
+        Sending a file that is still growing (a download, say) means sending it
+        again and again, and with --checksum reading all of it each time. So a
+        file that has changed again by the very next batch after it was sent
+        waits until it has been unchanged for STEADY_SECONDS. A file saved again
+        a few seconds later is sent at once, and one that has not changed since
+        it was sent is not sent again. Also returns each ready file's stamp, for
+        remembering once it was sent.
+        """
+        now, wall = time.monotonic(), time.time()
+        self.sent_at = {rel: sent for rel, sent in self.sent_at.items() if now - sent[0] < SENT_MEMORY_SECONDS}
+        ready, held, stamps = [], [], {}
+        for rel in batch:
+            try:
+                info = (self.root / rel).stat()
+                stamp = (info.st_mtime_ns, info.st_size)
+            except OSError:
+                ready.append(rel)
+                continue
+            sent = self.sent_at.get(rel)
+            if sent and sent[1] == stamp:
+                continue  # a late event for a version already sent
+            rewritten = sent is not None and now - sent[0] < self.interval + REWRITE_GRACE_SECONDS
+            if rewritten or rel in self.held_since:
+                waited = now - self.held_since.get(rel, now)
+                if wall - info.st_mtime < STEADY_SECONDS and waited < MAX_HOLD_SECONDS:
+                    held.append(rel)
+                    continue
+            ready.append(rel)
+            stamps[rel] = stamp
+        for rel in held:
+            if rel not in self.held_since:
+                emit(f"{rel} is still being written; it is sent once it has been unchanged for {STEADY_SECONDS}s", "dim")
+        self.held_since = {rel: self.held_since.get(rel, now) for rel in held}
+        return ready, held, stamps
 
     def flush(self):
         """Send what the watcher collected since the last flush."""
@@ -395,9 +494,17 @@ class Project:
         # Drop batch entries that no longer exist (temp files from atomic writes)
         batch = [f for f in batch if (self.root / f).exists()]
 
+        was_holding = bool(self.held_since)
+        if batch:
+            self.app.activate(self)  # holding a file back says so in this project's list
+        batch, held, stamps = self.hold_back_changing(batch)
+        if held:
+            with self.lock:
+                self.pending.update(held)
         if not batch and not removals:
+            if was_holding != bool(held):
+                self.rest()
             return
-        self.app.activate(self)
         if not self.offline:
             self.set_status("syncing…", "busy")
         before = state.changes
@@ -413,6 +520,8 @@ class Project:
             emit("watch mode switched off because the sync was cancelled", "yellow")
         elif self.reached(codes):
             self.count_changes(before)
+            finished = time.monotonic()  # a large file takes a while; what counts is what happens after
+            self.sent_at.update({rel: (finished, stamp) for rel, stamp in stamps.items()})
             self.unchecked += len(batch) + len(removals)
             if self.unchecked >= BURST_PATHS:
                 self.burst_at = time.monotonic()
@@ -511,6 +620,7 @@ class Project:
 
     def tick(self, now: float):
         """Called a few times a second: send queued changes and check the host when due."""
+        self.check_config()
         if self.error:
             return
         if self.watching and now - self.last_flush >= (RETRY_SECONDS if self.offline else self.interval):

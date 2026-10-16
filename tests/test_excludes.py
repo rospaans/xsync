@@ -39,18 +39,22 @@ def test_make_excluded_checker(path, expected):
     ("/repo/src/pkg/data/loader.py", False),
     ("/repo/data.py", False),
     # multi-part directory pattern
-    ("/repo/scripts/experiments/soma/README.md", True),
-    ("/repo/scripts/experiments/soma/src/model.py", True),
+    ("/repo/scripts/experiments/baseline/README.md", True),
+    ("/repo/scripts/experiments/baseline/src/model.py", True),
     ("/repo/scripts/experiments/other/run.py", False),
-    ("/repo/scripts/soma.py", False),
+    ("/repo/scripts/baseline.py", False),
     # anchored file pattern
     ("/repo/notes.txt", True),
     ("/repo/docs/notes.txt", False),
     # a directory pattern does not match a file of the same name
     ("/repo/src/outputs", False),
     ("/repo/src/outputs/run1.json", True),
+    # an unanchored folder pattern matches that folder at any depth, as in rsync
+    ("/repo/experiments/run1/checkpoints/epoch3/weights.pt", True),
+    ("/repo/checkpoints/w.bin", True),
+    ("/repo/experiments/checkpoints.py", False),
 ])
 def test_excluded_checker_anchored_and_nested_patterns(path, expected):
-    patterns = ["/data/", "scripts/experiments/soma/", "/notes.txt", "outputs/"]
+    patterns = ["/data/", "scripts/experiments/baseline/", "/notes.txt", "outputs/", "checkpoints/"]
     is_excluded = excludes_module.make_excluded_checker(Path("/repo"), patterns)
     assert is_excluded(path) is expected
