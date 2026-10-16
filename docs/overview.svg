@@ -65,10 +65,10 @@
 <text x="219.6" y="180" textLength="260.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#bcbcbc"> myhost:projects/data_pipeline/</text>
 <text x="799.2" y="180" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffd75f">●</text>
 <text x="807.6" y="180" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#eeeeee"> syncing…</text>
-<rect x="908.4" y="165" width="84.5" height="21" fill="#5fd787"/>
-<text x="908.4" y="180" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold"> WATCHING </text>
-<rect x="1017.6" y="165" width="101.3" height="21" fill="#585858"/>
-<text x="1017.6" y="180" textLength="100.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#eeeeee" font-weight="bold"> 42 changes </text>
+<rect x="908.4" y="165" width="101.3" height="21" fill="#585858"/>
+<text x="908.4" y="180" textLength="100.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#eeeeee" font-weight="bold"> 42 changes </text>
+<rect x="1034.4" y="165" width="84.5" height="21" fill="#5fd787"/>
+<text x="1034.4" y="180" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold"> WATCHING </text>
 <rect x="18.0" y="186" width="25.7" height="21" fill="#444444"/>
 <text x="18.0" y="201" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff" font-weight="bold"> › </text>
 <rect x="43.2" y="186" width="109.7" height="21" fill="#444444"/>
@@ -84,11 +84,11 @@
 <rect x="639.6" y="186" width="252.5" height="21" fill="#444444"/>
 <text x="639.6" y="201" textLength="252.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#eeeeee"> in sync, watching for changes</text>
 <rect x="891.6" y="186" width="25.7" height="21" fill="#444444"/>
-<rect x="916.8" y="186" width="84.5" height="21" fill="#5fd787"/>
-<text x="916.8" y="201" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold"> WATCHING </text>
-<rect x="1000.8" y="186" width="25.7" height="21" fill="#444444"/>
-<rect x="1026.0" y="186" width="92.9" height="21" fill="#585858"/>
-<text x="1026.0" y="201" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#eeeeee" font-weight="bold"> 7 changes </text>
+<rect x="916.8" y="186" width="92.9" height="21" fill="#585858"/>
+<text x="916.8" y="201" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#eeeeee" font-weight="bold"> 7 changes </text>
+<rect x="1009.2" y="186" width="25.7" height="21" fill="#444444"/>
+<rect x="1034.4" y="186" width="84.5" height="21" fill="#5fd787"/>
+<text x="1034.4" y="201" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold"> WATCHING </text>
 <rect x="1118.4" y="186" width="8.9" height="21" fill="#444444"/>
 <text x="43.2" y="222" textLength="109.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff" font-weight="bold">web_app      </text>
 <rect x="177.6" y="207" width="42.5" height="21" fill="#5f5faf"/>

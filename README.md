@@ -136,7 +136,21 @@ xsync only addresses paths below `remote`. But the SSH login it uses can normall
 
 You can rule that out on the server with a dedicated SSH key that is only allowed to run rsync inside one folder. Connections with that key cannot see or change anything outside it, whatever xsync or its config says. This uses `rrsync`, a script that ships with rsync.
 
-Pick the folder that should be the boundary. A good choice is your own top-level folder on the storage: every project below it can then share one key, and the worst a mistake can do is affect your own files.
+### Choosing the boundary folder
+
+Choose this folder on purpose. The restriction works in both directions:
+
+- **Outside the boundary, nothing can be touched.** Not by xsync, not by a wrong `remote`, not by a bug.
+- **Inside the boundary, everything can be.** The key may read, write and delete anything in that folder and in every subfolder below it, at any depth. That includes other projects synced with the same key, and results or data that jobs on the server wrote there.
+
+xsync is careful about what it deletes. It only works below each project's `remote`, a full sync refuses obviously dangerous paths, and watch mode only removes files you deleted locally. We do not expect it to delete anything it should not. But a full sync does run `rsync --delete`, which makes the remote folder an exact copy of your local project. So a `remote` pointing at the wrong folder, a mistyped path, or a bug could delete files anywhere inside the boundary, and the key will not stop that. Treat the boundary as the area you accept could be overwritten.
+
+How to choose:
+
+- **Smaller is safer.** A boundary around one project, or a folder holding only xsync projects, limits what any mistake can reach. The cost is one key and alias per boundary (see "Adding another folder").
+- **Your own top-level folder is convenient**, since every project below it shares one key. Choose it only if nothing irreplaceable lives anywhere below it.
+- **Keep irreplaceable data outside the boundary**: datasets, results from long jobs, anything without a backup. If it has to be inside, add it to the project's `exclude` list, since excluded paths are never sent or deleted, and keep a backup.
+- **Never use a folder that also holds other people's files.**
 
 ### One-time setup
 
@@ -167,7 +181,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/xsync_ed25519 -C xsync
 
 Press Enter twice to leave the passphrase empty, so xsync can use the key without a prompt.
 
-**Step 3. Allow that key on the server, limited to the folder.** The server needs one new line in `~/.ssh/authorized_keys`: the restriction, followed by your new public key. You do not have to assemble it by hand. On your machine, this command builds the line and appends it on the server (change the folder path first):
+**Step 3. Allow that key on the server, limited to the folder.** This is where you set the boundary, so choose it first (see "Choosing the boundary folder" above). The server needs one new line in `~/.ssh/authorized_keys`: the restriction, followed by your new public key. You do not have to assemble it by hand. On your machine, this command builds the line and appends it on the server (change the folder path first):
 
 ```bash
 echo "command=\"/usr/bin/rrsync /data/projects/you\",restrict $(cat ~/.ssh/xsync_ed25519.pub)" | ssh -T myhost 'cat >> ~/.ssh/authorized_keys'
@@ -428,12 +442,12 @@ xsync remembers each project the first time you run it there (it walks up from t
   q  Quit
 
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   data_pipeline    SSH  myhost:projects/data_pipeline/                      ● syncing…    WATCHING     42 changes
- › my_project       SSH  myhost:projects/my_project/     ● in sync, watching for changes    WATCHING     7 changes
+   data_pipeline    SSH  myhost:projects/data_pipeline/                      ● syncing…    42 changes     WATCHING
+ › my_project       SSH  myhost:projects/my_project/     ● in sync, watching for changes    7 changes     WATCHING
    web_app          SSH  myhost:projects/web_app/                                          ● 3 differences at 15:20
 ```
 
-Each row is a project: its name, where it syncs to, what it is doing, a green `WATCHING` tag while watch mode is on, and how many changes it has sent. The rows are in alphabetical order, and `›` marks the highlighted one.
+Each row is a project: its name, where it syncs to, what it is doing, how many changes it has sent, and at the end a green `WATCHING` tag while watch mode is on. The rows are in alphabetical order, and `›` marks the highlighted one.
 
 | Key | Action |
 |---|---|

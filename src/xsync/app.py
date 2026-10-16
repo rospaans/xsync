@@ -170,10 +170,10 @@ class App:
                 left += [("   ", ""), (f" {project.panel.transport.upper()} ", BAR_TRANSPORT),
                          (f" {project.remote}", "38;5;250")]
             right = [("●", BAR_DOT[project.panel.level]), (f" {project.panel.state}", "38;5;255")]
-            if project.watching:
-                right += [("   ", ""), (f" {BAR_LABEL['watch']} ", BAR_BADGE["watch"])]
             if project.changes:
                 right += [("   ", ""), (f" {project.changes} changes ", BAR_TAG)]
+            if project.watching:  # last, at the right edge, where it is easy to scan for
+                right += [("   ", ""), (f" {BAR_LABEL['watch']} ", BAR_BADGE["watch"])]
             right.append((" ", ""))
             if project.remote:  # too narrow: shorten the remote
                 room = width - segments_length(left[:4]) - 2 - segments_length(right)

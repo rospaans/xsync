@@ -364,7 +364,8 @@ def test_watched_projects_stand_out_in_the_overview(hub, tmp_path):
     rows = [visible(row) for row in hub.table_rows(160)]
     alpha_row, beta_row = rows
     assert " WATCHING " in alpha_row and " WATCHING " not in beta_row
-    assert alpha_row.index("WATCHING") < alpha_row.index("6 changes")   # left of the changes count
+    assert alpha_row.rstrip().endswith("WATCHING")              # at the end, after the changes count
+    assert alpha_row.index("6 changes") < alpha_row.index("WATCHING")
     alpha.observer = None
 
 
