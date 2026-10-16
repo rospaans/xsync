@@ -354,3 +354,33 @@ def test_choice_rows_fit_the_width_and_height():
     assert sorted(cell for row in rows for cell in row.split()) == names
     short = ui_module.choice_rows(names, 60, 3)
     assert len(short) == 3 and "… and 20 more" in visible(short[-1])
+
+
+def test_watched_projects_stand_out_in_the_overview(hub, tmp_path):
+    hub.register(make_project_folder(tmp_path / "work" / "beta", "host:projects/beta/"))
+    alpha, beta = hub.projects
+    alpha.observer = object()                                  # as if watching
+    alpha.changes = 6
+    rows = [visible(row) for row in hub.table_rows(160)]
+    alpha_row, beta_row = rows
+    assert " WATCHING " in alpha_row and " WATCHING " not in beta_row
+    assert alpha_row.index("WATCHING") < alpha_row.index("6 changes")   # left of the changes count
+    alpha.observer = None
+
+
+def test_the_open_projects_badge_animates_while_watching(hub):
+    project = hub.projects[0]
+    hub.open(project)
+    project.observer = object()
+    start = 1000.0
+    hub._last_dots = start
+    steps = []
+    for tick in range(1, 6):
+        hub.animate(start + tick * app_module.DOTS_SECONDS)
+        steps.append(project.panel.dots)
+    assert steps == [1, 2, 3, 0, 1]
+    hub.animate(start + 5 * app_module.DOTS_SECONDS + 0.1)    # too soon for the next step
+    assert project.panel.dots == 1
+    project.observer = None
+    hub.animate(start + 100)                                   # not watching: stands still
+    assert project.panel.dots == 1

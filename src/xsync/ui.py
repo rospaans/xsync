@@ -18,7 +18,11 @@ BAR_BACKGROUND = "48;5;236"
 BAR_BADGE = {"watch": "1;38;5;16;48;5;78", "idle": "1;38;5;16;48;5;75", "offline": "1;38;5;16;48;5;176"}
 
 
-BAR_LABEL = {"watch": "WATCH", "idle": "XSYNC", "offline": "OFFLINE"}
+BAR_LABEL = {"watch": "WATCHING", "idle": "XSYNC", "offline": "OFFLINE"}
+
+
+# In watch mode the badge counts dots up and back: WATCHING, WATCHING., WATCHING.., WATCHING...
+WATCH_DOTS = 3
 
 
 # The transport tag (SSH or LOCAL) in front of the remote
@@ -177,11 +181,22 @@ class Panel:
         self.mode, self.state, self.level, self.detail = "idle", "starting…", "busy", ""
         self.switches: dict[str, bool] = {}   # on/off buttons, by key
         self.highlights: set[str] = set()     # buttons to draw attention to, such as an update to install
+        self.dots = 0                         # the step of the watch-mode animation, 0 to WATCH_DOTS
         self.message, self.message_color = "", "dim"
+
+    def badge_label(self, spaced: bool = False) -> str:
+        """The mode name; in watch mode with its dots, padded so the badge keeps one width."""
+        label = BAR_LABEL[self.mode]
+        full = label + "." * WATCH_DOTS if self.mode == "watch" else label
+        if self.mode == "watch":
+            label += "." * self.dots
+        if spaced:
+            label, full = " ".join(label), " ".join(full)
+        return label.ljust(len(full))
 
     def bar(self, width: int, badge: tuple[str, str] | None = None) -> str:
         """The mode badge, what is synced where, and on the right the current state."""
-        badge = badge or (f" {BAR_LABEL[self.mode]} ", BAR_BADGE[self.mode])
+        badge = badge or (f" {self.badge_label()} ", BAR_BADGE[self.mode])
         left = [badge, (f"  {self.name}", "1;97")]
         if self.remote:
             left += [("  →  ", "38;5;250"), (f" {self.transport.upper()} ", BAR_TRANSPORT),
@@ -250,8 +265,7 @@ class Panel:
 
     def banner(self, width: int) -> str:
         """The status bar, with the mode name letter-spaced on a wide badge when there is room."""
-        label = BAR_LABEL[self.mode]
-        text = f"   {' '.join(label)}   " if width >= 90 else f" {label} "
+        text = f"   {self.badge_label(spaced=True)}   " if width >= 90 else f" {self.badge_label()} "
         return self.bar(width, (text, BAR_BADGE[self.mode]))
 
     def message_row(self, width: int) -> str:

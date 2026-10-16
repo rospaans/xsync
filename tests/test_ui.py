@@ -12,7 +12,7 @@ from helpers import make_panel, visible
 def test_fixed_rows_never_exceed_terminal_width(width, colors, monkeypatch):
     monkeypatch.setattr(run_state, "force_colors", colors)
     panel = make_panel()
-    states = [("watch", project_module.IDLE, "ok", "WATCH"), ("idle", "3 differences at 15:44", "busy", "XSYNC"),
+    states = [("watch", project_module.IDLE, "ok", "WATCHING"), ("idle", "3 differences at 15:44", "busy", "XSYNC"),
               ("offline", "offline, 3 queued, retrying", "problem", "OFFLINE")]
     for mode, state, level, label in states:
         panel.mode, panel.state, panel.level, panel.detail = mode, state, level, "28 changes · last 15:44:16"
@@ -112,3 +112,20 @@ def test_message_row_is_empty_without_a_message():
 ])
 def test_parse_keys(chunk, expected):
     assert ui_module.parse_keys(chunk) == expected
+
+
+@pytest.mark.parametrize("width", [60, 200])
+def test_the_watching_badge_counts_dots_without_moving_the_bar(width, monkeypatch):
+    monkeypatch.setattr(run_state, "force_colors", True)
+    panel = make_panel()
+    panel.mode = "watch"
+    banners = []
+    for dots in range(ui_module.WATCH_DOTS + 1):
+        panel.dots = dots
+        banners.append(visible(panel.banner(width)))
+    label = "W A T C H I N G" if width >= 90 else "WATCHING"
+    dot = " ." if width >= 90 else "."
+    for dots, banner in enumerate(banners):
+        assert (label + dot * dots + " ") in banner
+    # the project name sits in the same column at every step
+    assert len({banner.index("a_project") for banner in banners}) == 1

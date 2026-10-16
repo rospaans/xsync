@@ -428,12 +428,12 @@ xsync remembers each project the first time you run it there (it walks up from t
   q  Quit
 
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   data_pipeline    SSH  myhost:projects/data_pipeline/                             ● syncing…    42 changes
- › my_project       SSH  myhost:projects/my_project/            ● in sync, watching for changes    7 changes
-   web_app          SSH  myhost:projects/web_app/                                    ● 3 differences at 15:20
+   data_pipeline    SSH  myhost:projects/data_pipeline/                      ● syncing…    WATCHING     42 changes
+ › my_project       SSH  myhost:projects/my_project/     ● in sync, watching for changes    WATCHING     7 changes
+   web_app          SSH  myhost:projects/web_app/                                          ● 3 differences at 15:20
 ```
 
-Each row is a project: its name, where it syncs to, what it is doing, and how many changes it has sent. The rows are in alphabetical order, and `›` marks the highlighted one.
+Each row is a project: its name, where it syncs to, what it is doing, a green `WATCHING` tag while watch mode is on, and how many changes it has sent. The rows are in alphabetical order, and `›` marks the highlighted one.
 
 | Key | Action |
 |---|---|
@@ -514,7 +514,7 @@ The top of the screen stays fixed; changes scroll below it. On a narrow terminal
 | `h` | Help: what each key does. |
 | `q` | Quit xsync, for all projects. Ctrl+C works too. |
 
-**The bar** shows, from left to right: the mode (`XSYNC` when idle, `WATCH`, or `OFFLINE`), the project, an `SSH` or `LOCAL` tag with the remote, the current state behind a dot, the number of changes sent, and the time of the last one. The dot is green when in sync, yellow when busy or when there are differences, and magenta for problems.
+**The bar** shows, from left to right: the mode (`XSYNC` when idle, `WATCHING` with dots that count up while watch mode is on, or `OFFLINE`), the project, an `SSH` or `LOCAL` tag with the remote, the current state behind a dot, the number of changes sent, and the time of the last one. The dot is green when in sync, yellow when busy or when there are differences, and magenta for problems.
 
 **The buttons** show state too: the key cap of `w` and `v` is green while that mode is on, and `r` turns magenta when the connection is lost.
 
@@ -541,7 +541,7 @@ xsync uses the terminal's alternate screen, like an editor does: when you quit, 
 Press `w`. xsync does a full sync and then sends changes as they happen, in batches collected over the `interval` (2 seconds by default):
 
 ```
- WATCH   my_project  →   SSH  myhost:/data/projects/you/my_project/           ● in sync, watching for changes    4 changes   last 15:26:41
+ WATCHING   my_project  →   SSH  myhost:/data/projects/you/my_project/           ● in sync, watching for changes    4 changes   last 15:26:41
 
 15:26:27  + notes/draft.md
 15:26:31  ~ src/model.py

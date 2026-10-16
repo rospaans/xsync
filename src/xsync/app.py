@@ -14,9 +14,13 @@ from .output import Printer, clock, emit, paint, state, warn
 from .project import Project
 from . import update
 from .ui import (
-    BAR_DOT, BAR_TAG, BAR_TRANSPORT, KEY_HELP, OVERVIEW_HELP, OVERVIEW_KEYS, ROW_SELECTED, SETTINGS_HELP,
-    SETTINGS_KEYS, Panel, Screen, choice_rows, segments_length, spread, styled,
+    BAR_BADGE, BAR_DOT, BAR_LABEL, BAR_TAG, BAR_TRANSPORT, KEY_HELP, OVERVIEW_HELP, OVERVIEW_KEYS, ROW_SELECTED, SETTINGS_HELP,
+    SETTINGS_KEYS, WATCH_DOTS, Panel, Screen, choice_rows, segments_length, spread, styled,
 )
+
+
+# Seconds between steps of the watch-mode badge's dots
+DOTS_SECONDS = 0.5
 
 
 class App:
@@ -49,6 +53,7 @@ class App:
         self._drawn_rows = 0
         self._list_height = 0  # rows of a project's list that fit on screen
         self._resized = False  # set by the resize signal; the redraw happens in the loop
+        self._last_dots = time.monotonic()  # when the watch-mode badge last moved on
         self.projects = [Project(root, self) for root in load_registry(registry)]
         self.sort()
 
@@ -165,6 +170,8 @@ class App:
                 left += [("   ", ""), (f" {project.panel.transport.upper()} ", BAR_TRANSPORT),
                          (f" {project.remote}", "38;5;250")]
             right = [("●", BAR_DOT[project.panel.level]), (f" {project.panel.state}", "38;5;255")]
+            if project.watching:
+                right += [("   ", ""), (f" {BAR_LABEL['watch']} ", BAR_BADGE["watch"])]
             if project.changes:
                 right += [("   ", ""), (f" {project.changes} changes ", BAR_TAG)]
             right.append((" ", ""))
@@ -581,6 +588,15 @@ class App:
         thread.start()
         return thread
 
+    def animate(self, now: float):
+        """Move the dots of the open project's WATCHING badge on, twice a second."""
+        project = self.view
+        if project is None or not project.watching or now - self._last_dots < DOTS_SECONDS:
+            return
+        self._last_dots = now
+        project.panel.dots = (project.panel.dots + 1) % (WATCH_DOTS + 1)
+        self.draw()  # only the fixed rows; the list below is left alone
+
     def run(self):
         """Show the overview and handle keys until quit."""
         self.start_update_check()
@@ -609,6 +625,7 @@ class App:
                     now = time.monotonic()
                     for project in list(self.projects):
                         project.tick(now)
+                    self.animate(now)
         except KeyboardInterrupt:
             pass
         finally:
