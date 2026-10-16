@@ -88,6 +88,10 @@ def test_check_now_says_what_github_has(hub, github):
     github["version"] = None
     hub.on_settings_key("c")
     assert "could not reach GitHub" in hub.screen.written[-1]
+    github["version"] = "0.2.0"
+    hub.on_settings_key("c")
+    assert "✓ xsync 0.2.0 is up to date." in hub.screen.written[-1]   # says so, not only in the list
+    assert hub.settings_notes == [("✓ xsync 0.2.0 is up to date.", "green")]
 
 
 def test_the_startup_check_can_be_switched_off_and_is_remembered(hub, monkeypatch):
@@ -144,7 +148,7 @@ def test_update_does_nothing_when_up_to_date_or_offline(hub, github, monkeypatch
     hub.open_settings()
     github["version"] = "0.2.0"
     hub.on_settings_key("u")
-    assert "xsync 0.2.0 is up to date; nothing to update." in hub.screen.written[-1]
+    assert "✓ xsync 0.2.0 is up to date; nothing to update." in hub.screen.written[-1]
     github["version"] = None
     hub.on_settings_key("u")
     assert "Could not reach GitHub" in hub.screen.written[-1]

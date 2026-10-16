@@ -39,7 +39,8 @@ class App:
         self.settings = load_settings(self.settings_file)
         self.settings_panel = Panel("settings", SETTINGS_KEYS)
         self.in_settings = False  # the settings screen is shown (self.view is None meanwhile)
-        self.settings_notes: list[str] = []  # lines under the settings, until the next key press
+        # Lines under the settings, until the next key press; a (text, color) pair has its own color
+        self.settings_notes: list[str | tuple[str, str]] = []
         self.latest: tuple[str | None, str] | None = None  # the version on GitHub, and when that was checked
         self.updated_to = ""  # the version installed by u; it is used from the next start
         self.update_note = ""  # set from a background thread when GitHub has a newer version
@@ -236,7 +237,10 @@ class App:
         elif self.updated_to:
             headline = f" ✓ Updated to xsync {self.updated_to}. Quit (q) and start xsync again to use it."
             body = [paint(headline[:max(width - 1, 0)], "green"), ""] + body
-        notes = [paint(f" {note}"[:max(width - 1, 0)], "dim") for note in self.settings_notes]
+        notes = []
+        for note in self.settings_notes:
+            text, color = note if isinstance(note, tuple) else (note, "dim")
+            notes.append(paint(f" {text}"[:max(width - 1, 0)], color))
         rows = (panel.header_rows(width) + body + [""] + notes)[:size.lines]
         fixed = "".join(f"\033[{row};1H\033[2K{text}" for row, text in enumerate(rows, 1))
         below = f"\033[{len(rows) + 1};1H\033[J" if len(rows) < size.lines else ""
@@ -332,7 +336,16 @@ class App:
         self.settings_notes = ["checking GitHub…"]
         self.draw()
         self.found_version(update.latest_version())
-        self.settings_notes = [] if self.latest[0] else ["no answer from GitHub; is this computer online?"]
+        latest = self.latest[0]
+        if latest is None:
+            self.settings_notes = ["no answer from GitHub; is this computer online?"]
+        elif self.updated_to or update.is_newer(latest):
+            self.settings_notes = []  # the line at the top says it
+        else:
+            self.settings_notes = [self.up_to_date_note()]
+
+    def up_to_date_note(self) -> tuple[str, str]:
+        return f"✓ xsync {__version__} is up to date.", "green"
 
     def found_version(self, latest: str | None):
         """Remember what GitHub said; from the startup check's thread too, so nothing is drawn here."""
@@ -353,7 +366,8 @@ class App:
             self.settings_notes = ["Could not reach GitHub, so it is not known whether there is a newer version. Nothing was changed."]
             return
         if not update.is_newer(latest):
-            self.settings_notes = [f"xsync {__version__} is up to date; nothing to update."]
+            text, color = self.up_to_date_note()
+            self.settings_notes = [(text[:-1] + "; nothing to update.", color)]
             return
         folder = update.install_folder()
         problem = update.why_not_update(folder)
