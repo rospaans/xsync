@@ -132,10 +132,10 @@ def test_update_needs_a_typed_yes(hub, github, monkeypatch):
     monkeypatch.setattr(update_module, "run_update", lambda folder: ran.append(folder) or (True, ["done"]))
     hub.open_settings()
     for answer in (None, "", "y", "no"):                     # Esc, Enter, and anything but yes
-        monkeypatch.setattr(hub, "ask", lambda label, text="": answer)
+        monkeypatch.setattr(hub, "ask", lambda label, text="", **options: answer)
         hub.on_settings_key("u")
         assert ran == [] and "Not updated" in hub.screen.written[-1]
-    monkeypatch.setattr(hub, "ask", lambda label, text="": "yes")
+    monkeypatch.setattr(hub, "ask", lambda label, text="", **options: "yes")
     hub.on_settings_key("u")
     assert ran == ["/opt/xsync-checkout"]
     assert "Updated to xsync 0.3.0. Quit (q) and start xsync again" in hub.screen.written[-1]
@@ -144,7 +144,7 @@ def test_update_needs_a_typed_yes(hub, github, monkeypatch):
 
 def test_update_does_nothing_when_up_to_date_or_offline(hub, github, monkeypatch):
     monkeypatch.setattr(update_module, "run_update", lambda folder: pytest.fail("pulled without a newer version"))
-    monkeypatch.setattr(hub, "ask", lambda label, text="": pytest.fail("asked without a newer version"))
+    monkeypatch.setattr(hub, "ask", lambda label, text="", **options: pytest.fail("asked without a newer version"))
     hub.open_settings()
     github["version"] = "0.2.0"
     hub.on_settings_key("u")
@@ -160,7 +160,7 @@ def test_update_is_not_run_twice(hub, github, monkeypatch):
     ran = []
     monkeypatch.setattr(update_module, "why_not_update", lambda folder: None)
     monkeypatch.setattr(update_module, "run_update", lambda folder: ran.append(folder) or (True, ["done"]))
-    monkeypatch.setattr(hub, "ask", lambda label, text="": "yes")
+    monkeypatch.setattr(hub, "ask", lambda label, text="", **options: "yes")
     hub.open_settings()
     hub.on_settings_key("u")
     hub.on_settings_key("u")
@@ -173,7 +173,7 @@ def test_update_is_not_run_twice(hub, github, monkeypatch):
 def test_update_refuses_when_it_is_not_safe(hub, github, monkeypatch):
     github["version"] = "0.3.0"
     monkeypatch.setattr(update_module, "why_not_update", lambda folder: "it has uncommitted changes")
-    monkeypatch.setattr(hub, "ask", lambda label, text="": pytest.fail("asked although it cannot update"))
+    monkeypatch.setattr(hub, "ask", lambda label, text="", **options: pytest.fail("asked although it cannot update"))
     hub.open_settings()
     hub.on_settings_key("u")
     assert "Not updating: it has uncommitted changes" in hub.screen.written[-1]

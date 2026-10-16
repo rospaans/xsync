@@ -65,3 +65,24 @@ def test_temp_files_are_created_outside_any_project(tmp_path, monkeypatch):
     path = config_module.write_temp_file("exclude", ["*.pyc", "data/"])
     assert path.parent == tmp_path and path.name.startswith("xsync-") and path.suffix == ".exclude"
     assert path.read_text() == "*.pyc\ndata/\n"
+
+
+def test_complete_path_works_like_a_shell(tmp_path, monkeypatch):
+    for folder in ("projects/alpha", "projects/beta", "projects/bravo", "projects/.hidden", "my folder"):
+        (tmp_path / folder).mkdir(parents=True)
+    (tmp_path / "projects" / "notes.txt").write_text("x")
+    complete = lambda text, **options: config_module.complete_path(text, tmp_path, **options)
+
+    assert complete("proj") == ("projects/", [])                         # one fit: completed, with a /
+    assert complete("projects/a") == ("projects/alpha/", [])
+    assert complete("projects/b") == ("projects/b", ["beta/", "bravo/"])  # several: as far as they agree
+    assert complete("projects/") == ("projects/", ["alpha/", "beta/", "bravo/"])   # folders only, no hidden
+    assert complete("projects/.") == ("projects/.hidden/", [])           # hidden once a . is typed
+    assert complete("projects/n", folders_only=False) == ("projects/notes.txt", [])
+    assert complete("projects/zzz") == ("projects/zzz", [])              # nothing fits: unchanged
+    assert complete("my") == ("my folder/", [])                          # spaces are fine
+    assert complete(str(tmp_path / "proj")) == (str(tmp_path / "projects") + "/", [])   # absolute
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert complete("~") == ("~/", [])
+    assert complete("~/pro") == ("~/projects/", [])                      # ~ stays as typed
+    assert complete("nowhere/x") == ("nowhere/x", [])

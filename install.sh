@@ -44,6 +44,33 @@ fi
 PY_VERSION=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 echo "Using $PYTHON ($PY_VERSION)"
 
+# xsync needs GNU rsync 3.x, and so do the checks in the README (rsync --list-only ...).
+# macOS ships openrsync, which fails against many servers. Warn, but install anyway.
+is_gnu_rsync() {
+    "$1" --version 2>/dev/null | head -n 1 | grep -Eq '^rsync[[:space:]]+version[[:space:]]+3\.'
+}
+RSYNC_FOUND=$(command -v rsync || true)
+if [[ -z "$RSYNC_FOUND" ]] || ! is_gnu_rsync "$RSYNC_FOUND"; then
+    GNU_RSYNC=""
+    for candidate in /opt/homebrew/bin/rsync /usr/local/bin/rsync; do
+        if [[ -x "$candidate" ]] && is_gnu_rsync "$candidate"; then
+            GNU_RSYNC="$candidate"
+            break
+        fi
+    done
+    echo
+    echo "WARNING: this terminal does not find GNU rsync 3.x (found: ${RSYNC_FOUND:-no rsync at all})."
+    if [[ -n "$GNU_RSYNC" ]]; then
+        echo "   GNU rsync is installed at $GNU_RSYNC, but this terminal still finds the other one first."
+        echo "   Open a new terminal window, then check with: rsync --version"
+    else
+        echo "   Install it first:  brew install rsync   (on Linux: your package manager's rsync)"
+        echo "   Then open a new terminal window, so it is found, and check with: rsync --version"
+    fi
+    echo "   It should print 'rsync  version 3.x'. Until then, the rsync --list-only checks in the README fail."
+    echo
+fi
+
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # A dedicated venv, so xsync and watchdog never touch the system Python

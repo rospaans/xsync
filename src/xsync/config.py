@@ -177,3 +177,32 @@ def save_settings(path: Path, settings: dict):
     lines = ["# xsync's settings. Managed by xsync: change them with the , key in the overview."]
     lines += [f"{key} = {json.dumps(value)}" for key, value in settings.items()]
     path.write_text("\n".join(lines) + "\n")
+
+
+def complete_path(text: str, base: Path, folders_only: bool = True) -> tuple[str, list[str]]:
+    """Complete the last part of a typed path, the way a shell's Tab does.
+
+    Relative paths start from base; ~ is the home folder and is kept as typed.
+    Returns the completed text and, when several names fit, those names (folders
+    end in /). Hidden names are only offered once a . has been typed.
+    """
+    if text == "~":
+        return "~/", []
+    head, slash, prefix = text.rpartition("/")
+    typed_folder = head + slash
+    folder = Path(os.path.expanduser(typed_folder)) if typed_folder else Path()
+    if not folder.is_absolute():
+        folder = base / folder
+    try:
+        entries = [entry for entry in folder.iterdir() if entry.name.startswith(prefix)]
+    except OSError:
+        return text, []
+    if not prefix.startswith("."):
+        entries = [entry for entry in entries if not entry.name.startswith(".")]
+    names = sorted(entry.name + "/" if entry.is_dir() else entry.name
+                   for entry in entries if entry.is_dir() or not folders_only)
+    if not names:
+        return text, []
+    if len(names) == 1:
+        return typed_folder + names[0], []
+    return typed_folder + os.path.commonprefix(names), names

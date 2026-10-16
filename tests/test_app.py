@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from xsync import app as app_module, config as config_module, output as output_module
+from xsync import app as app_module, config as config_module, output as output_module, ui as ui_module
 from xsync.output import state as run_state
 from helpers import FakeScreen, fake_editor, make_project_folder, needs_gnu_rsync, shown_lines, tree, visible
 
@@ -139,7 +139,7 @@ def test_adding_a_folder_that_already_has_a_config(hub, tmp_path, monkeypatch):
     (beta / "deep").mkdir()
     edited = fake_editor(tmp_path, monkeypatch, None)
     answers = iter([str(beta / "deep"), None, str(tmp_path / "no-such-folder")])
-    monkeypatch.setattr(hub, "ask", lambda label, text="": next(answers))
+    monkeypatch.setattr(hub, "ask", lambda label, text="", **options: next(answers))
 
     hub.on_overview_key("a")                              # a folder inside the project finds its root
     assert hub.projects[-1].root == beta and hub.selected == 1
@@ -153,7 +153,7 @@ def test_adding_a_folder_without_a_config_creates_one_and_opens_the_editor(hub, 
     folder = (tmp_path / "work" / "fresh").resolve()
     folder.mkdir(parents=True)
     edited = fake_editor(tmp_path, monkeypatch, "host:projects/fresh/")
-    monkeypatch.setattr(hub, "ask", lambda label, text="": str(folder))
+    monkeypatch.setattr(hub, "ask", lambda label, text="", **options: str(folder))
 
     hub.on_overview_key("a")
     project = hub.projects[-1]
@@ -172,7 +172,7 @@ def test_add_prompt_starts_empty_and_a_dot_means_the_current_folder(hub, tmp_pat
     fresh.mkdir(parents=True)
     fake_editor(tmp_path, monkeypatch, "host:projects/here/")
     monkeypatch.chdir(fresh)
-    monkeypatch.setattr(hub, "ask", lambda label, text="": seen.append(text) or ".")
+    monkeypatch.setattr(hub, "ask", lambda label, text="", **options: seen.append(text) or ".")
     hub.on_overview_key("a")
     assert seen == [""]                                    # nothing is filled in beforehand
     assert hub.projects[hub.selected].root == fresh
@@ -300,3 +300,57 @@ def test_a_resize_is_redrawn_from_the_loop_not_the_signal_handler(hub):
     hub._resized = True
     hub.while_waiting(project, 1.0)                         # also picked up while a sync is running
     assert not hub._resized
+
+
+class TypingScreen(FakeScreen):
+    """A terminal on which the given keys are pressed, one at a time."""
+
+    def __init__(self, keys):
+        super().__init__()
+        self.keys = list(keys)
+
+    def read_key(self, timeout):
+        return self.keys.pop(0) if self.keys else None
+
+
+def test_tab_completes_the_folder_to_add(hub, tmp_path, monkeypatch):
+    target = make_project_folder(tmp_path / "work" / "gamma_project", "host:projects/gamma/")
+    (tmp_path / "work" / "gamma_other").mkdir()
+    monkeypatch.chdir(tmp_path)
+    # wo Tab → work/, g Tab → work/gamma_ (two fit), p Tab → work/gamma_project/
+    hub.screen = TypingScreen(["w", "o", "\t", "g", "\t", "p", "\t", "\n"])
+    seen = []
+    original_draw = hub.draw
+    monkeypatch.setattr(hub, "draw", lambda *args, **kwargs: (seen.append(hub.panel.message), original_draw(*args, **kwargs)))
+    answer = hub.ask("folder", complete=lambda text: config_module.complete_path(text, tmp_path))
+    assert answer == "work/gamma_project/"
+    assert any("2 fit, listed below" in message for message in seen)
+    assert hub.choices == []                                   # gone once the question is answered
+    assert any("Tab completes" in message for message in seen)
+    assert (tmp_path / answer).resolve() == target
+
+
+def test_tab_choices_are_listed_below_the_buttons(hub, tmp_path, monkeypatch):
+    for number in range(40):
+        (tmp_path / f"folder_{number:02d}").mkdir()
+    monkeypatch.chdir(tmp_path)
+    hub.screen = TypingScreen(["f", "\t"])
+    drawn = []
+    monkeypatch.setattr(hub.screen, "read_key", lambda timeout: hub.screen.keys.pop(0) if hub.screen.keys else "esc")
+    original_write = hub.screen.write
+    monkeypatch.setattr(hub.screen, "write", lambda text: (drawn.append(visible(text)), original_write(text)))
+    hub.ask("folder", complete=lambda text: config_module.complete_path(text, tmp_path))
+    with_choices = next(text for text in drawn if "40 fit, listed below" in text)
+    for number in range(40):
+        assert f"folder_{number:02d}/" in with_choices         # every one, not just what fits on one line
+    assert "alpha" in with_choices                             # the project table is still there
+
+
+def test_choice_rows_fit_the_width_and_height():
+    names = [f"name_{number:02d}/" for number in range(30)]
+    rows = ui_module.choice_rows(names, 60, 20)
+    assert all(len(visible(row)) <= 60 for row in rows)
+    assert rows[0].split()[:2] == ["name_00/", "name_06/"]     # read top to bottom, like ls
+    assert sorted(cell for row in rows for cell in row.split()) == names
+    short = ui_module.choice_rows(names, 60, 3)
+    assert len(short) == 3 and "… and 20 more" in visible(short[-1])

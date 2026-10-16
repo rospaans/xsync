@@ -255,7 +255,7 @@ def test_a_new_config_left_unedited_is_not_usable(hub, tmp_path, monkeypatch):
     folder = (tmp_path / "work" / "fresh").resolve()
     folder.mkdir(parents=True)
     fake_editor(tmp_path, monkeypatch, None)
-    monkeypatch.setattr(hub, "ask", lambda label, text="": str(folder))
+    monkeypatch.setattr(hub, "ask", lambda label, text="", **options: str(folder))
     hub.on_overview_key("a")
     project = hub.projects[-1]
     assert "set 'remote'" in project.error

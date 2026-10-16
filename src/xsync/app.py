@@ -9,13 +9,13 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import STARTER_CONFIG, clean_path, find_root, load_registry, load_settings, save_registry, save_settings
+from .config import STARTER_CONFIG, clean_path, complete_path, find_root, load_registry, load_settings, save_registry, save_settings
 from .output import Printer, clock, emit, paint, state, warn
 from .project import Project
 from . import update
 from .ui import (
     BAR_DOT, BAR_TAG, BAR_TRANSPORT, KEY_HELP, OVERVIEW_HELP, OVERVIEW_KEYS, ROW_SELECTED, SETTINGS_HELP,
-    SETTINGS_KEYS, Panel, Screen, segments_length, spread, styled,
+    SETTINGS_KEYS, Panel, Screen, choice_rows, segments_length, spread, styled,
 )
 
 
@@ -35,6 +35,7 @@ class App:
         self.selected = 0
         self.panel = Panel("", OVERVIEW_KEYS)
         self.notes: list[str] = []  # lines under the overview table, until the next key press
+        self.choices: list[str] = []  # what Tab could complete to, shown below the buttons while asking
         self.settings_file = registry.parent / "settings.toml"
         self.settings = load_settings(self.settings_file)
         self.settings_panel = Panel("settings", SETTINGS_KEYS)
@@ -182,7 +183,9 @@ class App:
         notes = [paint(f" {note}"[:max(width - 1, 0)], "dim") for note in self.notes]
         if self.update_note:
             notes.append(paint(f" {self.update_note}"[:max(width - 1, 0)], "yellow"))
-        rows = (self.panel.header_rows(width) + self.table_rows(width) + [""] + notes)[:size.lines]
+        header = self.panel.header_rows(width)
+        rows = (header + self.choices_shown(width, size.lines - len(header)) + self.table_rows(width)
+                + [""] + notes)[:size.lines]
         fixed = "".join(f"\033[{row};1H\033[2K{text}" for row, text in enumerate(rows, 1))
         below = f"\033[{len(rows) + 1};1H\033[J" if len(rows) < size.lines else ""
         title = f"\033]0;xsync: {self.panel.state}\007"
@@ -241,10 +244,18 @@ class App:
         for note in self.settings_notes:
             text, color = note if isinstance(note, tuple) else (note, "dim")
             notes.append(paint(f" {text}"[:max(width - 1, 0)], color))
-        rows = (panel.header_rows(width) + body + [""] + notes)[:size.lines]
+        header = panel.header_rows(width)
+        rows = (header + self.choices_shown(width, size.lines - len(header)) + body + [""] + notes)[:size.lines]
         fixed = "".join(f"\033[{row};1H\033[2K{text}" for row, text in enumerate(rows, 1))
         below = f"\033[{len(rows) + 1};1H\033[J" if len(rows) < size.lines else ""
         self.screen.write(f"\033[r{fixed}{below}\033]0;xsync: settings\007")
+
+    def choices_shown(self, width: int, room: int) -> list[str]:
+        """The Tab choices as a grid, with a line under them; nothing when there are none."""
+        if not self.choices:
+            return []
+        grid = choice_rows(self.choices, width, max(room - 3, 1))
+        return grid + [paint("─" * max(width - 1, 0), "dim")]
 
     def draw_project(self, clear: bool = False):
         """The fixed rows of the project on screen; its list scrolls in the region below them."""
@@ -286,12 +297,18 @@ class App:
 
     # --- input
 
-    def ask(self, label: str, text: str = "") -> str | None:
-        """Read a line of text on the message row, starting from `text`. Returns None if cancelled with Esc."""
+    def ask(self, label: str, text: str = "", complete=None) -> str | None:
+        """Read a line of text on the message row, starting from `text`. Returns None if cancelled with Esc.
+
+        With complete (a function from the text so far to the completed text and the
+        names that still fit), Tab completes, and the names are shown when several fit.
+        """
         panel = self.view.panel if self.view else self.settings_panel if self.in_settings else self.panel
         previous = (panel.message, panel.message_color)
+        keys = "Tab completes, Enter to confirm, Esc to cancel" if complete else "Enter to confirm, Esc to cancel"
+        hint = keys
         while True:
-            panel.message, panel.message_color = f"{label}: {text}▏   Enter to confirm, Esc to cancel", "bold"
+            panel.message, panel.message_color = f"{label}: {text}▏   {hint}", "bold"
             self.draw()
             key = self.screen.read_key(0.5)
             self.after_resize()
@@ -302,12 +319,24 @@ class App:
             if key == "esc":
                 text = None
                 break
-            if key in ("\x7f", "\b"):
+            hint = keys
+            if key == "\t" and complete:
+                completed, options = complete(text)
+                # Several fit: listed in full below the buttons, and kept there while typing on.
+                # A project's list cannot make room, so there they go on this line, as far as it reaches.
+                self.choices = options if self.view is None else []
+                if options:
+                    hint = f"{len(options)} fit, listed below" if self.view is None else "  ".join(options)
+                elif completed == text:
+                    hint = "no match"
+                text = completed
+            elif key in ("\x7f", "\b"):
                 text = text[:-1]
             elif key == "\x15":  # Ctrl+U
                 text = ""
             elif len(key) == 1 and key.isprintable():
                 text += key
+        self.choices = []
         panel.message, panel.message_color = previous
         self.draw()
         return text
@@ -414,7 +443,8 @@ class App:
 
     def add_project(self):
         """Add a folder as a project; a folder without a config gets a starter one to edit."""
-        text = self.ask("project folder to add (type, paste or drag it here; . is the current folder)")
+        text = self.ask("project folder to add (type, paste or drag it here; . is the current folder)",
+                        complete=lambda typed: complete_path(typed, Path.cwd()))
         if not text:
             return
         folder = Path(clean_path(text))

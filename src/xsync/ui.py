@@ -92,7 +92,7 @@ OVERVIEW_HELP = {
     "s": "sync the highlighted project now",
     "w": "watch mode on/off for the highlighted project; it keeps running while you look elsewhere",
     "c": "compare the highlighted project with the server; changes nothing",
-    "a": "add a project: type, paste or drag its folder, then Enter; a folder without a .xsync.toml gets one",
+    "a": "add a project: type, paste or drag its folder (Tab completes), then Enter; a folder without a .xsync.toml gets one",
     "e": "edit the highlighted project's .xsync.toml in your editor ($VISUAL, $EDITOR, or nano)",
     "x": "forget the highlighted project: it leaves this list, and no file anywhere is touched",
     "v": "verbose on/off: show rsync's raw output",
@@ -143,6 +143,29 @@ def spread(left: list[tuple[str, str]], right: list[tuple[str, str]], width: int
     gap = max(width - segments_length(left) - segments_length(right), 0)
     row = clip_segments(left + [(" " * gap, "")] + right, width)
     return row + [(" " * (width - segments_length(row)), "")]
+
+
+def choice_rows(names: list[str], width: int, max_rows: int) -> list[str]:
+    """Names in columns, read top to bottom like ls: as many columns as fit the width.
+
+    When they do not all fit in max_rows, the last row says how many are left out.
+    """
+    if not names or max_rows < 1:
+        return []
+    column_width = min(max(len(name) for name in names) + 2, max(width - 2, 1))
+    columns = max(1, (width - 2) // column_width)
+    rows = -(-len(names) // columns)
+    left_out = 0
+    if rows > max_rows:
+        rows = max(max_rows - 1, 1)
+        left_out = len(names) - rows * columns
+    grid = []
+    for row in range(rows):
+        cells = [names[index] for index in range(row, min(len(names), rows * columns), rows)]
+        grid.append(" " + "".join(cell[:column_width - 1].ljust(column_width) for cell in cells).rstrip())
+    if left_out > 0:
+        grid.append(paint(f" … and {left_out} more; type more letters to narrow them down", "dim"))
+    return grid
 
 
 class Panel:

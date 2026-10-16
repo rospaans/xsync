@@ -50,18 +50,47 @@ A typical setup: a coding agent edits the project inside a devcontainer on your 
 ## Requirements
 
 - Python 3.11+ (for `tomllib` in the standard library)
-- `rsync`, preferably GNU rsync 3.x (`brew install rsync` on macOS, which ships openrsync)
+- GNU rsync 3.x, on your machine and on the server. macOS ships a different rsync (openrsync) that fails against many servers, so install GNU rsync first; see step 1 below.
 - Key-based SSH login to the server through a host alias in `~/.ssh/config` (see "SSH setup")
 - `watchdog` for watch mode (installed by `install.sh`)
 - A terminal: xsync is interactive and does not run from scripts
 
+## Getting started
+
+The whole setup, in order. Each step links to its section.
+
+1. **Install GNU rsync and xsync** ([Installation](#installation)).
+2. **Make an SSH alias for the server** that logs in with a key ([SSH setup](#ssh-setup)).
+3. **Optional: restrict that key to one folder on the server** ([Restricting xsync to one remote folder](#restricting-xsync-to-one-remote-folder)).
+4. **Add your first project in xsync and sync it** ([Setting up a new project](#setting-up-a-new-project)).
+
+Steps 1 to 3 are done once per machine and server. Step 4 is done once per project.
+
 ## Installation
+
+**Step 1. GNU rsync.** On macOS:
+
+```bash
+brew install rsync
+```
+
+Then **open a new terminal window**, so that the new rsync is found instead of the one macOS ships, and check:
+
+```bash
+rsync --version
+```
+
+The first line must read `rsync  version 3.x`. If it says `openrsync` or `version 2.6.9`, the terminal still finds the old one: open a new window, or see "rsync warning about not GNU rsync 3.x" in Troubleshooting. On Linux, your package manager's `rsync` is already GNU rsync.
+
+**Step 2. xsync.**
 
 ```bash
 git clone https://github.com/rospaans/xsync.git
 cd xsync
 bash install.sh
 ```
+
+The installer warns if the terminal does not find GNU rsync 3.x.
 
 The installer:
 
@@ -94,6 +123,8 @@ Check that it works without a prompt:
 ```bash
 rsync --list-only myhost:.
 ```
+
+It lists your home folder on the server. If it prints rsync errors instead (for example about the protocol or an unexpected tag), run `rsync --version` first: it must say `rsync  version 3.x`. See [Installation](#installation).
 
 The alias (`myhost`) is what each project's `remote` line will refer to.
 
@@ -185,7 +216,7 @@ Host myhost-sync
     IdentitiesOnly yes
 ```
 
-**Step 5. Verify the restriction.** On your machine, run these three commands and compare the results:
+**Step 5. Verify the restriction.** On your machine, run these three commands and compare the results. If the first one fails with rsync errors rather than listing a folder, check `rsync --version` first (see [Installation](#installation)); the macOS rsync does not work with `rrsync`.
 
 ```bash
 rsync --list-only myhost-sync:.
@@ -225,7 +256,17 @@ This syncs to `/data/projects/you/research/project_1/` on the server. For severa
 | `~/work/project_1/` | `myhost-sync:research/project_1/` | `/data/projects/you/research/project_1/` |
 | `~/work/project_2/` | `myhost-sync:research/project_2/` | `/data/projects/you/research/project_2/` |
 
-The key keeps every project inside the boundary. The `remote` line keeps each project in its own folder. Start `xsync`, check the remote shown in the bar, and press `c` to compare; that changes nothing.
+The key keeps every project inside the boundary. The `remote` line keeps each project in its own folder.
+
+**That is the server side done.** Next, add your first project in xsync, using the restricted alias in its `remote` line. In short:
+
+1. `cd` into your project folder and run `xsync`.
+2. Press `a`, type `.` (this folder) and press Enter. xsync creates the project's `.xsync.toml` and opens it in your editor.
+3. Set the `remote` line, for example `remote = "myhost-sync:research/project_1/"`, then save and close the editor.
+4. Back in xsync, press `c` to compare (nothing changes), then `o` to open the project and read the list.
+5. If the list looks right, press `s` to sync, or `w` to sync and keep watching.
+
+[Setting up a new project](#setting-up-a-new-project) explains each step.
 
 ### Adding another folder
 
@@ -300,7 +341,7 @@ Nothing is mounted. xsync copies one local folder to one folder on the server, a
 
 Each project has its own `.xsync.toml`, so each project syncs to its own folder on the server and nowhere else.
 
-**Step 1. Add the project.** Run `xsync` in the root of your local project and press `a`, type `.` for the current folder, and press Enter:
+**Step 1. Add the project.** Run `xsync` in the root of your local project and press `a`, type `.` for the current folder, and press Enter. Any other folder works too: type its path, pressing Tab to complete folder names as in a shell (when several fit, they are listed), or drag the folder into the terminal.
 
 ```bash
 cd /path/to/my_project
@@ -401,7 +442,7 @@ Each row is a project: its name, where it syncs to, what it is doing, and how ma
 | `s` | Sync the highlighted project now. |
 | `w` | Switch watch mode on or off for the highlighted project. |
 | `c` | Compare the highlighted project with the server, changing nothing. |
-| `a` | Add a project: type, paste or drag its folder and press Enter (`.` is the folder you started xsync in; Esc cancels). A folder without a `.xsync.toml` gets a starter one, which opens in your editor so you can set `remote`. |
+| `a` | Add a project: type, paste or drag its folder and press Enter (`.` is the folder you started xsync in; Tab completes folder names; Esc cancels). A folder without a `.xsync.toml` gets a starter one, which opens in your editor so you can set `remote`. |
 | `e` | Edit the highlighted project's `.xsync.toml` in your editor. When you close the editor, xsync reads the file again. |
 | `x` | Forget the highlighted project: it leaves this list and stops being watched. No file is touched, locally or on the server, and `a` adds it back. |
 | `v` | Verbose on or off, for all projects. |
@@ -582,8 +623,11 @@ Some files or attributes could not be transferred. If the errors say "Operation 
 **Works with my normal alias but not with the restricted one**
 Check that `remote` is relative to the boundary folder (`myhost-sync:research/project_1/`, not an absolute path), that the parent folder exists, and that `rsync --list-only myhost-sync:.` works.
 
+**`rsync --list-only` prints errors instead of a listing**
+Usually the terminal is using the rsync macOS ships, which does not work with many servers or with `rrsync`. Run `rsync --version`: the first line must read `rsync  version 3.x`. If not, run `brew install rsync`, open a new terminal window, and check again. A window that was already open keeps finding the old rsync.
+
 **rsync warning about "not GNU rsync 3.x"**
-macOS ships a different rsync. Run `brew install rsync`; xsync picks up `/opt/homebrew/bin/rsync` automatically.
+macOS ships a different rsync. Run `brew install rsync`; xsync picks up `/opt/homebrew/bin/rsync` automatically. For the `rsync` commands you type yourself, open a new terminal window afterwards.
 
 **xsync uses the wrong rsync**
 xsync runs `/opt/homebrew/bin/rsync` if it exists, and otherwise the first `rsync` on your `PATH`. If your GNU rsync is installed somewhere else (for example `/usr/local/bin/rsync` on an Intel Mac), the warning above keeps appearing or flags are rejected. Check what you have:
