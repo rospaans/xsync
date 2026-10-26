@@ -5,6 +5,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from xsync import config as config_module
 
 
@@ -86,3 +88,28 @@ def test_complete_path_works_like_a_shell(tmp_path, monkeypatch):
     assert complete("~") == ("~/", [])
     assert complete("~/pro") == ("~/projects/", [])                      # ~ stays as typed
     assert complete("nowhere/x") == ("nowhere/x", [])
+
+
+def test_a_folder_that_may_not_be_read_is_not_empty(tmp_path, monkeypatch):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError) as raised:
+            config_module.complete_path("locked/", tmp_path)
+    finally:
+        locked.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert config_module.cannot_read(raised.value).startswith("can't read ~/locked: permission denied")
+
+def test_a_path_that_only_fits_from_home_is_suggested(tmp_path, monkeypatch):
+    home, elsewhere = tmp_path / "home", tmp_path / "elsewhere"
+    (home / "Documents" / "papers").mkdir(parents=True)
+    elsewhere.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    assert config_module.from_home("Documents/", elsewhere) == "~/Documents/"
+    assert config_module.from_home("Docu", elsewhere) == "~/Docu"
+    assert config_module.from_home("Documents/papers", elsewhere) == "~/Documents/papers"
+    assert config_module.from_home("Nothing/", elsewhere) is None
+    assert config_module.from_home("~/Nothing", elsewhere) is None   # already from home
+    assert config_module.from_home("Nothing", home) is None          # started in the home folder itself

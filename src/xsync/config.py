@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shlex
+import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -184,7 +185,8 @@ def complete_path(text: str, base: Path, folders_only: bool = True) -> tuple[str
 
     Relative paths start from base; ~ is the home folder and is kept as typed.
     Returns the completed text and, when several names fit, those names (folders
-    end in /). Hidden names are only offered once a . has been typed.
+    end in /). Hidden names are only offered once a . has been typed. A folder
+    that may not be read raises PermissionError rather than looking empty.
     """
     if text == "~":
         return "~/", []
@@ -195,6 +197,8 @@ def complete_path(text: str, base: Path, folders_only: bool = True) -> tuple[str
         folder = base / folder
     try:
         entries = [entry for entry in folder.iterdir() if entry.name.startswith(prefix)]
+    except PermissionError:
+        raise
     except OSError:
         return text, []
     if not prefix.startswith("."):
@@ -206,3 +210,28 @@ def complete_path(text: str, base: Path, folders_only: bool = True) -> tuple[str
     if len(names) == 1:
         return typed_folder + names[0], []
     return typed_folder + os.path.commonprefix(names), names
+
+
+def cannot_read(error: PermissionError) -> str:
+    """Say which folder may not be read, and on macOS where that permission is given."""
+    folder = str(error.filename or "this folder")
+    home = str(Path.home())
+    if folder == home or folder.startswith(home + os.sep):
+        folder = "~" + folder[len(home):]
+    note = f"can't read {folder}: permission denied"
+    if sys.platform == "darwin":
+        note += " (give this terminal access in System Settings → Privacy & Security)"
+    return note
+
+
+def from_home(text: str, base: Path) -> str | None:
+    """The same relative path from the home folder, when nothing fits under base but something does there.
+
+    Catches typing Documents/ while xsync was started in some other folder.
+    """
+    if not text or text.startswith(("~", "/", ".")) or base.resolve() == Path.home().resolve():
+        return None
+    completed, names = complete_path(text, Path.home())
+    if names or completed != text or (Path.home() / text).is_dir():
+        return "~/" + text
+    return None

@@ -330,6 +330,59 @@ def test_tab_completes_the_folder_to_add(hub, tmp_path, monkeypatch):
     assert (tmp_path / answer).resolve() == target
 
 
+def test_no_match_suggests_the_path_from_home(hub, tmp_path, monkeypatch):
+    (tmp_path / "home" / "Documents").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    seen = []
+    original_draw = hub.draw
+    monkeypatch.setattr(hub, "draw", lambda *args, **kwargs: (seen.append(hub.panel.message), original_draw(*args, **kwargs)))
+    ask = lambda: hub.ask("folder", complete=lambda text: config_module.complete_path(text, Path.cwd()),
+                          suggest=lambda text: config_module.from_home(text, Path.cwd()))
+    hub.screen = TypingScreen(["D", "o", "c", "\t", "\t", "\n"])
+    assert ask() == "~/Documents/"                              # a second Tab takes the suggestion, completed
+    assert any("no match here; Tab for ~/Doc" in message for message in seen)
+    hub.screen = TypingScreen(["D", "o", "c", "\t", "x", "\t", "\n"])
+    assert ask() == "Docx"                                      # typing on drops it
+
+
+def test_a_folder_that_may_not_be_read_says_so(hub, tmp_path, monkeypatch):
+    # Like macOS keeping ~/Documents closed to a terminal: Tab and Enter both say why
+    locked = tmp_path / "locked"
+    (locked / "inner").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    original_draw = hub.draw
+    monkeypatch.setattr(hub, "draw", lambda *args, **kwargs: (seen.append(hub.panel.message), original_draw(*args, **kwargs)))
+    locked.chmod(0)
+    try:
+        hub.screen = TypingScreen(["l", "o", "c", "k", "e", "d", "/", "\t", "\n"])
+        hub.on_overview_key("a")
+    finally:
+        locked.chmod(0o755)
+    assert any(f"can't read {locked}: permission denied" in message for message in seen)
+    assert "permission denied" in hub.notes[0]                  # not "Not a folder"
+
+
+def test_a_folder_that_may_not_be_read_says_so(hub, tmp_path, monkeypatch):
+    # Like macOS keeping ~/Documents closed to a terminal: Tab and Enter both say why
+    locked = tmp_path / "locked"
+    (locked / "inner").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    original_draw = hub.draw
+    monkeypatch.setattr(hub, "draw", lambda *args, **kwargs: (seen.append(hub.panel.message), original_draw(*args, **kwargs)))
+    locked.chmod(0)
+    try:
+        hub.screen = TypingScreen(["l", "o", "c", "k", "e", "d", "/", "\t", "i", "n", "n", "e", "r", "\n"])
+        hub.on_overview_key("a")
+    finally:
+        locked.chmod(0o755)
+    assert any(f"can't read {locked}: permission denied" in message for message in seen)
+    assert "permission denied" in hub.notes[0]                  # not "Not a folder"
+
+
 def test_tab_choices_are_listed_below_the_buttons(hub, tmp_path, monkeypatch):
     for number in range(40):
         (tmp_path / f"folder_{number:02d}").mkdir()

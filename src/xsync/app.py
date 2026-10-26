@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import STARTER_CONFIG, clean_path, complete_path, find_root, load_registry, load_settings, save_registry, save_settings
+from .config import STARTER_CONFIG, cannot_read, clean_path, complete_path, find_root, from_home, load_registry, load_settings, save_registry, save_settings
 from .output import Printer, clock, emit, paint, state, warn
 from .project import Project
 from . import update
@@ -304,16 +304,19 @@ class App:
 
     # --- input
 
-    def ask(self, label: str, text: str = "", complete=None) -> str | None:
+    def ask(self, label: str, text: str = "", complete=None, suggest=None) -> str | None:
         """Read a line of text on the message row, starting from `text`. Returns None if cancelled with Esc.
 
         With complete (a function from the text so far to the completed text and the
         names that still fit), Tab completes, and the names are shown when several fit.
+        When nothing fits, suggest (a function from the text to an alternative, or None)
+        may offer something else, which the next Tab switches to.
         """
         panel = self.view.panel if self.view else self.settings_panel if self.in_settings else self.panel
         previous = (panel.message, panel.message_color)
         keys = "Tab completes, Enter to confirm, Esc to cancel" if complete else "Enter to confirm, Esc to cancel"
         hint = keys
+        alternative = None
         while True:
             panel.message, panel.message_color = f"{label}: {text}▏   {hint}", "bold"
             self.draw()
@@ -327,15 +330,25 @@ class App:
                 text = None
                 break
             hint = keys
+            offered, alternative = alternative, None
             if key == "\t" and complete:
-                completed, options = complete(text)
+                if offered:  # the Tab right after a suggestion takes it
+                    text = offered
+                try:
+                    completed, options = complete(text)
+                    if suggest and not options and completed == text:
+                        alternative = suggest(text)
+                except PermissionError as error:
+                    self.choices = []
+                    hint = cannot_read(error)
+                    continue
                 # Several fit: listed in full below the buttons, and kept there while typing on.
                 # A project's list cannot make room, so there they go on this line, as far as it reaches.
                 self.choices = options if self.view is None else []
                 if options:
                     hint = f"{len(options)} fit, listed below" if self.view is None else "  ".join(options)
                 elif completed == text:
-                    hint = "no match"
+                    hint = f"no match here; Tab for {alternative}" if alternative else "no match"
                 text = completed
             elif key in ("\x7f", "\b"):
                 text = text[:-1]
@@ -451,11 +464,17 @@ class App:
     def add_project(self):
         """Add a folder as a project; a folder without a config gets a starter one to edit."""
         text = self.ask("project folder to add (type, paste or drag it here; . is the current folder)",
-                        complete=lambda typed: complete_path(typed, Path.cwd()))
+                        complete=lambda typed: complete_path(typed, Path.cwd()),
+                        suggest=lambda typed: from_home(typed, Path.cwd()))
         if not text:
             return
         folder = Path(clean_path(text))
-        if not folder.is_dir():
+        try:
+            os.listdir(folder)  # rather than is_dir(), which cannot tell a closed folder from a missing one
+        except PermissionError as error:
+            self.notes = [cannot_read(error)]
+            return
+        except OSError:
             self.notes = [f"Not a folder: {folder}"]
             return
         root = find_root(folder.resolve())

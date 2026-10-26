@@ -355,7 +355,7 @@ Nothing is mounted. xsync copies one local folder to one folder on the server, a
 
 Each project has its own `.xsync.toml`, so each project syncs to its own folder on the server and nowhere else.
 
-**Step 1. Add the project.** Run `xsync` in the root of your local project and press `a`, type `.` for the current folder, and press Enter. Any other folder works too: type its path, pressing Tab to complete folder names as in a shell (when several fit, they are listed), or drag the folder into the terminal.
+**Step 1. Add the project.** Run `xsync` in the root of your local project and press `a`, type `.` for the current folder, and press Enter. Any other folder works too: type its path, pressing Tab to complete folder names as in a shell (when several fit, they are listed; a path typed without `~/` that only exists in your home folder, such as `Documents/`, gets a "Tab for `~/Documents/`" hint, and the next Tab switches to it), or drag the folder into the terminal.
 
 ```bash
 cd /path/to/my_project
