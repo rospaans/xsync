@@ -164,7 +164,7 @@ def test_compare_sync_and_watch_in_a_project(world):
     assert tree(remote) == {"a.txt", "sub/b.txt"}
 
     terminal.press("w")
-    terminal.expect("W A T C H", "in sync, watching for changes")
+    terminal.expect("W A T C H", "● in sync ")
     time.sleep(0.5)
     terminal.press("")                                        # only what the watcher causes from here on
     (source / "new.txt").write_text("n")

@@ -44,7 +44,7 @@ STEADY_SECONDS = 3
 MAX_HOLD_SECONDS = 60
 # An edit to .xsync.toml is read once the file has been left alone this long, not halfway through a save
 CONFIG_SETTLE_SECONDS = 1
-IDLE = "in sync, watching for changes"
+IDLE = "in sync"
 # Lines of history kept per project, so its list can be shown again after looking elsewhere
 LOG_LINES = 2000
 

@@ -443,7 +443,7 @@ xsync remembers each project the first time you run it there (it walks up from t
 
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
    data_pipeline    SSH  myhost:projects/data_pipeline/                      ● syncing…    42 changes     WATCHING
- › my_project       SSH  myhost:projects/my_project/     ● in sync, watching for changes    7 changes     WATCHING
+ › my_project       SSH  myhost:projects/my_project/     ● in sync    7 changes     WATCHING
    web_app          SSH  myhost:projects/web_app/                                          ● 3 differences at 15:20
 ```
 
@@ -555,7 +555,7 @@ xsync uses the terminal's alternate screen, like an editor does: when you quit, 
 Press `w`. xsync does a full sync and then sends changes as they happen, in batches collected over the `interval` (2 seconds by default):
 
 ```
- WATCHING   my_project  →   SSH  myhost:/data/projects/you/my_project/           ● in sync, watching for changes    4 changes   last 15:26:41
+ WATCHING   my_project  →   SSH  myhost:/data/projects/you/my_project/           ● in sync    4 changes   last 15:26:41
 
 15:26:27  + notes/draft.md
 15:26:31  ~ src/model.py
