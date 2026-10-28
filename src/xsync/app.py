@@ -15,7 +15,7 @@ from .project import Project
 from . import update
 from .ui import (
     BAR_BADGE, BAR_DOT, BAR_LABEL, BAR_TAG, BAR_TRANSPORT, KEY_HELP, OVERVIEW_HELP, OVERVIEW_KEYS, ROW_SELECTED, SETTINGS_HELP,
-    SETTINGS_KEYS, WATCH_DOTS, Panel, Screen, choice_rows, segments_length, spread, styled,
+    SETTINGS_KEYS, WATCH_DOTS, Panel, Screen, choice_rows, segments_length, shorten, spread, styled,
 )
 
 
@@ -28,7 +28,7 @@ class App:
 
     Everything runs in one loop: keys are handled, then every project gets a
     tick. Projects with watch mode on therefore keep syncing whichever view is
-    shown, and one long sync briefly holds up the rest.
+    shown. One long sync holds up the other projects, but not the screen (see while_waiting).
     """
 
     def __init__(self, registry: Path, verbose: bool = False, screen: Screen | None = None):
@@ -54,6 +54,7 @@ class App:
         self._list_height = 0  # rows of a project's list that fit on screen
         self._resized = False  # set by the resize signal; the redraw happens in the loop
         self._last_dots = time.monotonic()  # when the watch-mode badge last moved on
+        self.quitting = False  # q was pressed during a sync: it was cancelled, and the loop stops
         self.projects = [Project(root, self) for root in load_registry(registry)]
         self.sort()
 
@@ -106,19 +107,54 @@ class App:
             print(text, flush=True)
 
     def while_waiting(self, project: Project, seconds: float) -> bool:
-        """rsync is running for `project`: show for how long, allow scrolling, and cancel on Esc."""
+        """rsync is running for `project`: show for how long, keep the screen usable, and cancel on Esc.
+
+        Moving around works as usual, and so does anything that stays on this
+        computer, such as editing another project's config (see navigate). A key
+        that would run rsync is answered with a note, since only one rsync runs at
+        a time. q cancels and then quits.
+        """
         self.after_resize()
         base = project.panel.state.split("  ·  ")[0]
         if seconds >= 3:
             project.panel.state = f"{base}  ·  {int(seconds)}s, Esc cancels"
             self.refresh(project)
-        cancel = False
+        cancel = self.quitting
         while (key := self.screen.read_key(0)) is not None:
             if key == "esc":
                 cancel = True
-            elif self.view is project and key in ("up", "down", "pageup", "pagedown", "home", "end"):
-                self.on_project_key(key)
+            elif key == "q":
+                self.quitting = cancel = True
+            else:
+                self.navigate(key, project)
         return cancel
+
+    def navigate(self, key: str, busy: Project):
+        """Handle a key pressed while `busy` runs rsync: anything that does not run rsync itself.
+
+        Editing or forgetting the busy project waits, since its sync uses what they change.
+        """
+        refused = f"{key} is not run while {busy.name} is busy; press it again once that is done, or Esc to cancel it."
+        if self.in_settings:
+            if key in ("b", "left", "h"):
+                self.on_settings_key(key)
+            return
+        if self.view is None:
+            highlighted = self.projects[self.selected] if self.projects else None
+            if key in ("up", "k", "down", "j", "a", "h", ",") or (key in ("e", "x") and highlighted is not busy):
+                self.on_overview_key(key)
+            elif key in ("o", "\r", "\n", "right") and highlighted:
+                self.open(highlighted)
+            elif key in OVERVIEW_HELP:
+                self.notes = [refused]
+                self.draw()
+        elif key in ("b", "left", "up", "down", "pageup", "pagedown", "home", "end", "h", "p", "l") or (
+                key == "e" and self.view is not busy):
+            self.on_project_key(key)
+        elif key in KEY_HELP:
+            self.view.line(f"{clock()}  " + paint(refused, "yellow"))
+        # Whatever ran here may have made another project the one receiving output; rsync's goes to busy
+        self.activate(busy)
 
     def after_resize(self):
         """Redraw if the terminal changed size. Called from the loops, never from the signal handler:
@@ -162,25 +198,39 @@ class App:
         if not self.projects:
             return [paint("  No projects yet. Press a to add this folder or another one.", "dim")]
         name_width = min(max(len(project.name) for project in self.projects), 28)
-        rows = []
-        for index, project in enumerate(self.projects):
-            selected = index == self.selected
-            left = [(" › " if selected else "   ", "1;97"), (project.name[:name_width].ljust(name_width), "1;97")]
-            if project.remote:
-                left += [("   ", ""), (f" {project.panel.transport.upper()} ", BAR_TRANSPORT),
-                         (f" {project.remote}", "38;5;250")]
-            right = [("●", BAR_DOT[project.panel.level]), (f" {project.panel.state}", "38;5;255")]
-            if project.changes:
-                right += [("   ", ""), (f" {project.changes} changes ", BAR_TAG)]
-            if project.watching:  # last, at the right edge, where it is easy to scan for
-                right += [("   ", ""), (f" {BAR_LABEL['watch']} ", BAR_BADGE["watch"])]
-            right.append((" ", ""))
-            if project.remote:  # too narrow: shorten the remote
-                room = width - segments_length(left[:4]) - 2 - segments_length(right)
-                if len(left[4][0]) > room:
-                    left[4] = (left[4][0][:max(room - 1, 0)] + "…" if room > 0 else "", left[4][1])
-            rows.append(styled(spread(left, right, width), ROW_SELECTED if selected else ""))
-        return rows
+        return [self.overview_row(project, name_width, width, index == self.selected)
+                for index, project in enumerate(self.projects)]
+
+    def overview_row(self, project: Project, name_width: int, width: int, selected: bool) -> str:
+        """One project in the overview. When narrow, the remote is shortened, then the changes count
+        goes, then the remote, then the state is shortened; the WATCHING badge always stays."""
+        left = [(" › " if selected else "   ", "1;97"), (project.name[:name_width].ljust(name_width), "1;97")]
+        remote = [("   ", ""), (f" {project.panel.transport.upper()} ", BAR_TRANSPORT),
+                  (f" {project.remote}", "38;5;250")] if project.remote else []
+        status = f" {project.panel.state}"
+        changes = [("   ", ""), (f" {project.changes} changes ", BAR_TAG)] if project.changes else []
+        # Last, at the right edge, where it is easy to scan for
+        badge = [("   ", ""), (f" {BAR_LABEL['watch']} ", BAR_BADGE["watch"])] if project.watching else []
+
+        def over() -> int:  # with at least three spaces between the two halves
+            return segments_length(left + remote + changes + badge) + 3 + 1 + len(status) + 1 - width
+
+        def shorten_remote(shortest: int) -> list[tuple[str, str]]:  # unless that leaves less than shortest
+            if not remote or over() <= 0 or len(remote[2][0]) - over() < shortest:
+                return remote
+            return remote[:2] + [(shorten(remote[2][0], len(remote[2][0]) - over()), remote[2][1])]
+
+        remote = shorten_remote(20)
+        if over() > 0:
+            changes = []
+        remote = shorten_remote(8)
+        if over() > 0:
+            remote = []
+        if over() > 0:
+            room = len(status) - over()
+            status = shorten(status, room) if room >= 3 else ""
+        right = [("●", BAR_DOT[project.panel.level]), (status, "38;5;255"), *changes, *badge, (" ", "")]
+        return styled(spread(left + remote, right, width), ROW_SELECTED if selected else "")
 
     def draw_overview(self):
         size = self.screen.size()
@@ -533,12 +583,14 @@ class App:
         elif key in ("o", "\r", "\n", "right"):
             self.open(project)
             return
-        elif key in ("s", "c", "w"):
+        elif key in ("s", "m", "c", "w"):
             if project.error:
                 self.notes = [f"{project.name}: {project.error}"]
             else:
                 project.touched = True
                 if key == "s":
+                    project.sync()
+                elif key == "m":
                     project.full_sync()
                 elif key == "c":
                     project.compare()
@@ -563,7 +615,7 @@ class App:
         if project.scroll and key in KEY_HELP:  # anything else happens at the end of the list
             self.scroll_list(-len(project.log))
         self.activate(project)
-        actions = {"s": project.full_sync, "c": project.compare, "i": project.show_status,
+        actions = {"s": project.sync, "m": project.full_sync, "c": project.compare, "i": project.show_status,
                    "r": lambda: project.check_connection(announce=True),
                    "w": lambda: project.stop_watch() if project.watching else project.start_watch()}
         if key == "h":
@@ -626,7 +678,7 @@ class App:
                 # Nothing runs until a key is pressed: no compare, no sync, no connection
                 self.draw()
                 while True:
-                    key = self.screen.read_key(0.2)
+                    key = self.screen.read_key(0.1)
                     self.after_resize()
                     if self._update_found:
                         self._update_found = False
@@ -643,7 +695,11 @@ class App:
                             self.on_project_key(key)
                     now = time.monotonic()
                     for project in list(self.projects):
+                        if self.quitting:
+                            break
                         project.tick(now)
+                    if self.quitting:
+                        break
                     self.animate(now)
         except KeyboardInterrupt:
             pass

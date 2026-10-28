@@ -77,6 +77,10 @@ CHANGE_MARKS = {"new": ("+", "green"), "updated": ("~", "blue"), "deleted": ("-"
 CANCELLED = -1000
 
 
+# Seconds between calls to state.output.waiting() while rsync runs: how quickly keys are answered
+WAIT_SECONDS = 0.1
+
+
 def run_rsync(cmd: list[str], quiet: bool = False) -> int:
     """Run rsync and turn its output into lines for the active project.
 
@@ -109,26 +113,30 @@ def run_rsync(cmd: list[str], quiet: bool = False) -> int:
             warn(text)
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    started = time.monotonic()
+    started = last_wait = time.monotonic()
     cancelled = False
     unfinished = b""
     while True:
-        ready, _, _ = select.select([proc.stdout], [], [], 0.25)
-        if not ready:
+        ready, _, _ = select.select([proc.stdout], [], [], WAIT_SECONDS)
+        if ready:
+            data = os.read(proc.stdout.fileno(), 65536)
+            if not data:
+                break
+            *lines, unfinished = (unfinished + data).split(b"\n")
+            for line in lines:
+                handle(line.decode("utf-8", "replace"))
+        elif proc.poll() is not None:
             # rsync is done once it has exited and nothing is left to read. Waiting for the pipe
             # to close would hang when ssh leaves a background process holding it (ControlPersist).
-            if proc.poll() is not None:
-                break
-            if not cancelled and state.output.waiting(time.monotonic() - started):
+            break
+        # Also while rsync keeps printing (a first sync lists every file): otherwise keys and
+        # the timer would only be seen once it pauses
+        now = time.monotonic()
+        if not cancelled and now - last_wait >= WAIT_SECONDS:
+            last_wait = now
+            if state.output.waiting(now - started):
                 cancelled = True
                 proc.terminate()
-            continue
-        data = os.read(proc.stdout.fileno(), 65536)
-        if not data:
-            break
-        *lines, unfinished = (unfinished + data).split(b"\n")
-        for line in lines:
-            handle(line.decode("utf-8", "replace"))
     if unfinished:
         handle(unfinished.decode("utf-8", "replace"))
     proc.stdout.close()

@@ -9,7 +9,7 @@ import tomllib
 from collections import deque
 from pathlib import Path
 
-from . import __version__
+from . import __version__, sent as sent_record
 from .config import DEFAULT_INTERVAL, PLACEHOLDER_REMOTE, resolve_in_project, write_temp_file
 from .excludes import make_excluded_checker
 from .output import clock, emit, state, warn
@@ -42,6 +42,9 @@ REWRITE_GRACE_SECONDS = 1.5
 SENT_MEMORY_SECONDS = 60
 STEADY_SECONDS = 3
 MAX_HOLD_SECONDS = 60
+# Watch mode sends changes once nothing has changed for this long, so a single save goes out at
+# once while a burst (a git checkout, say) still goes as one batch; `interval` is the longest it waits
+QUIET_SECONDS = 0.3
 # An edit to .xsync.toml is read once the file has been left alone this long, not halfway through a save
 CONFIG_SETTLE_SECONDS = 1
 IDLE = "in sync"
@@ -82,6 +85,9 @@ class Project:
         # Files still being written: when each was last sent, and since when each is held back
         self.sent_at: dict[str, tuple[float, tuple]] = {}
         self.held_since: dict[str, float] = {}
+        # What was last sent to this remote (see sent.py); None until read, or when there is no record
+        self.sent: dict[str, tuple[int, int]] | None = None
+        self.sent_for = ""  # the remote that self.sent belongs to
         self.config_stamp = None  # .xsync.toml as last read, to notice edits made outside xsync
         self.error = ""  # why this project cannot be synced, if it cannot
         self.config: dict = {}
@@ -288,12 +294,84 @@ class Project:
 
     # --- actions
 
-    def full_sync(self):
+    def record_file(self) -> Path:
+        return sent_record.record_path(self.app.registry.parent / "sent", self.root, self.remote)
+
+    def load_sent(self) -> dict | None:
+        """What was last sent to the current remote, read once."""
+        if self.sent_for != self.remote:
+            self.sent, self.sent_for = sent_record.load(self.record_file()), self.remote
+        return self.sent
+
+    def remember_sent(self, files: dict):
+        self.sent, self.sent_for = files, self.remote
+        sent_record.save(self.record_file(), files)
+
+    def scan(self) -> dict:
+        """The files to keep in sync, and where most of them are if there are very many."""
+        self.set_status("listing files…", "busy")
+        files = sent_record.scan(self.root, self.is_excluded)
+        if len(files) >= sent_record.MANY_FILES:
+            crowded = ", ".join(f"{folder} ({count:,})" for folder, count in sent_record.crowded_folders(files))
+            emit(f"{len(files):,} files to keep in sync; most are in {crowded}. If the server does not "
+                 "need them, add them to exclude (press e).", "yellow")
+        return files
+
+    def sync(self):
+        """Send what changed since the last sync, found by comparing stamps here; the server is not read.
+
+        Without a record of an earlier sync (the first time, or a new remote) this is a full sync.
+        """
         self.app.activate(self)
-        self.set_status("syncing…", "busy")
+        recorded = self.load_sent()
+        if recorded is None:
+            emit("no record of an earlier sync to this remote, so this is a full sync", "dim")
+            self.full_sync()
+            return
+        files = self.scan()
+        changed = [rel for rel, stamp in files.items() if recorded.get(rel) != stamp]
+        # Files that are now excluded are left on the remote, as a full sync would
+        gone = [rel for rel in recorded if rel not in files and not self.is_excluded(str(self.root / rel))]
+        when = clock()[:5]
+        if not changed and not gone:
+            if state.pretty:
+                emit("nothing changed since the last sync", "dim")
+            self.resting = (f"in sync at {when}", "ok")
+            self.rest()
+            return
+        size = sent_record.size_text(sum(files[rel][1] for rel in changed))
+        plan = [f"sending {len(changed):,} changed file(s), {size}"] if changed else []
+        plan += [f"deleting {len(gone):,}"] if gone else []
+        emit(", ".join(plan), "dim")
+        self.set_status(f"syncing {len(changed) + len(gone):,} file(s)…", "busy")
+        before = state.changes
+        codes = []
+        if gone:
+            codes.append(delete_from_remote(gone, self.root, self.remote, self.rsync, quiet=self.offline))
+        if changed:
+            codes.append(sync_batch(changed, self.root, self.remote, rsync=self.rsync, quiet=self.offline))
+        if self.reached(codes):
+            self.count_changes(before)
+            if all(code == 0 for code in codes):
+                self.remember_sent(files)
+                self.resting = (f"in sync at {when}", "ok")
+            elif CANCELLED in codes:
+                self.resting = (f"sync cancelled at {when}", "busy")
+            else:
+                self.resting = (f"sync had errors at {when}", "problem")
+        self.rest()
+
+    def full_sync(self):
+        """Mirror the whole project with rsync, which checks every file against the server."""
+        self.app.activate(self)
+        files = self.scan()  # before rsync starts: a file changed meanwhile is sent again next time
+        emit(f"full sync: checking {len(files):,} file(s) against the server", "dim")
+        self.set_status(f"full sync of {len(files):,} file(s)…", "busy")
         before = state.changes
         with self.excludes() as exclude_file:
             rc = sync_full(self.root, self.remote, exclude_file, False, self.rsync, quiet=self.offline)
+        if rc == 0:
+            self.remember_sent(files)
         if self.reached([rc]):
             if not self.count_changes(before) and rc == 0 and state.pretty:
                 emit("already up to date", "dim")
@@ -417,7 +495,7 @@ class Project:
         self.observer.schedule(Handler(), str(self.root), recursive=True)
         self.observer.start()
         self.last_flush = time.monotonic()
-        self.full_sync()
+        self.sync()
 
     def stop_watch(self):
         self.app.activate(self)
@@ -522,6 +600,9 @@ class Project:
             self.count_changes(before)
             finished = time.monotonic()  # a large file takes a while; what counts is what happens after
             self.sent_at.update({rel: (finished, stamp) for rel, stamp in stamps.items()})
+            if self.load_sent() is not None and all(code == 0 for code in codes):
+                self.remember_sent({rel: stamp for rel, stamp in {**self.sent, **stamps}.items()
+                                    if rel not in removals})
             self.unchecked += len(batch) + len(removals)
             if self.unchecked >= BURST_PATHS:
                 self.burst_at = time.monotonic()
@@ -623,10 +704,11 @@ class Project:
         self.check_config()
         if self.error:
             return
-        if self.watching and now - self.last_flush >= (RETRY_SECONDS if self.offline else self.interval):
+        quiet_for = time.monotonic() - self.last_event
+        settled = not self.offline and self.last_event > self.last_flush and quiet_for >= QUIET_SECONDS
+        if self.watching and (settled or now - self.last_flush >= (RETRY_SECONDS if self.offline else self.interval)):
             self.last_flush = now
             self.flush()
-        quiet_for = time.monotonic() - self.last_event
         if self.watching and not self.offline and not self.pending and not self.deleted:
             in_burst = time.monotonic() - self.burst_at < BURST_WINDOW_SECONDS
             if self.unchecked >= (1 if in_burst else BURST_PATHS) and quiet_for >= SETTLE_SECONDS:
@@ -668,7 +750,7 @@ def status_rows(repo_root: Path, config: dict, remote: str, rsync: list[str], ve
         ("rsync", f"{rsync[0]}  ({flavor})"),
         ("rsync_args", " ".join(config.get("rsync_args", [])) or "none"),
         ("exclude", f"{len(config.get('exclude', []))} patterns"),
-        ("interval", f"{float(config.get('interval', DEFAULT_INTERVAL)):g}s between watch batches"),
+        ("interval", f"{float(config.get('interval', DEFAULT_INTERVAL)):g}s at most between watch batches"),
         ("watch mode", watching),
     ]
     return rows, reason is None and reachable in ("reachable", "folder exists")

@@ -42,7 +42,7 @@ exclude = [
 # A local path instead of SSH (replaces the remote line above)
 # remote = "/Volumes/your-volume/your-project/"
 
-# Seconds watch mode collects changes before sending them (default 2)
+# Longest wait, in seconds, before watch mode sends changes that keep coming (default 2)
 # interval = 2
 
 # Extra rsync flags. This set is for a server folder on a network share (CIFS/SMB)
@@ -121,7 +121,7 @@ def resolve_in_project(text: str, repo_root: Path) -> str | None:
 INTERNAL_FILES = {".xsync.files", ".xsync.exclude"}
 
 
-# Seconds watch mode collects changes before sending them; `interval` in .xsync.toml overrides it
+# The longest watch mode collects changes before sending them, while they keep coming; `interval` in .xsync.toml overrides it
 DEFAULT_INTERVAL = 2.0
 
 

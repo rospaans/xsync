@@ -42,15 +42,15 @@ ROW_SELECTED = "48;5;238"
 
 # Buttons in a project's view: what you do, and what you look at
 PROJECT_KEYS = [
-    [("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("f", "Path"), ("r", "Reconnect"), ("b", "Back")],
-    [("i", "Info"), ("p", "Problems"), ("e", "Edit"), ("l", "Clear"), ("v", "Verbose"), ("h", "Help")],
-    [("q", "Quit")],
+    [("s", "Sync"), ("m", "Mirror"), ("w", "Watch"), ("c", "Compare"), ("f", "Path"), ("r", "Reconnect")],
+    [("i", "Info"), ("p", "Problems"), ("e", "Edit"), ("l", "Clear"), ("v", "Verbose"), ("b", "Back")],
+    [("h", "Help"), ("q", "Quit")],
 ]
 
 
 # Buttons in the overview; s, w and c act on the highlighted project
 OVERVIEW_KEYS = [
-    [("o", "Open"), ("s", "Sync"), ("w", "Watch"), ("c", "Compare"), ("a", "Add")],
+    [("o", "Open"), ("s", "Sync"), ("m", "Mirror"), ("w", "Watch"), ("c", "Compare"), ("a", "Add")],
     [("e", "Edit"), ("x", "Forget"), ("v", "Verbose"), (",", "Settings"), ("h", "Help")],
     [("q", "Quit")],
 ]
@@ -74,8 +74,9 @@ SETTINGS_HELP = {
 
 
 KEY_HELP = {
-    "s": "sync the whole project now",
-    "w": "watch mode on/off: on does a full sync, then sends changes as you make them",
+    "s": "sync: send what changed here since the last sync; quick, as it does not read the server",
+    "m": "mirror (full sync): compare every file with the server and make it match; slower, catches changes made there",
+    "w": "watch mode on/off: on syncs what changed since the last sync, then sends changes as you make them",
     "c": "compare with the server, like git status; changes nothing",
     "f": "sync one file or folder: type, paste or drag a path, then Enter",
     "r": "check the connection now and send what was queued",
@@ -93,7 +94,8 @@ KEY_HELP = {
 OVERVIEW_HELP = {
     "↑ ↓": "move the highlight (j and k work too)",
     "o": "open the highlighted project (Enter and → work too)",
-    "s": "sync the highlighted project now",
+    "s": "sync the highlighted project: send what changed here since the last sync",
+    "m": "mirror (full sync) the highlighted project: compare every file with the server",
     "w": "watch mode on/off for the highlighted project; it keeps running while you look elsewhere",
     "c": "compare the highlighted project with the server; changes nothing",
     "a": "add a project: type, paste or drag its folder (Tab completes), then Enter; a folder without a .xsync.toml gets one",
@@ -129,6 +131,13 @@ def styled(segments: list[tuple[str, str]], background: str = "") -> str:
 
 def segments_length(segments: list[tuple[str, str]]) -> int:
     return sum(len(text) for text, _ in segments)
+
+
+def shorten(text: str, length: int) -> str:
+    """Cut text to at most length characters, ending in … where it was cut, not in a stray comma or dot."""
+    if len(text) <= length:
+        return text
+    return text[:max(length - 1, 0)].rstrip(" ,·…") + "…" if length > 0 else ""
 
 
 def clip_segments(segments: list[tuple[str, str]], width: int) -> list[tuple[str, str]]:
@@ -212,18 +221,21 @@ class Panel:
         right += extras + [(" ", "")]
 
         # Too narrow: drop the time, then the count, then shorten the remote, then the state
-        while extras and segments_length(left) + 2 + segments_length(right) > width:
+        while extras and segments_length(left) + 3 + segments_length(right) > width:
             extras.pop()
             if extras and extras[-1][0] == "   ":
                 extras.pop()
             right = right[:2] + extras + [(" ", "")]
         if self.remote:
-            room = width - segments_length(left[:4]) - 2 - segments_length(right)
-            if len(left[4][0]) > room:
-                left[4] = (left[4][0][:max(room - 1, 0)] + "…" if room > 0 else "", left[4][1])
-        over = segments_length(left) + segments_length(right) - width
+            room = width - segments_length(left[:4]) - 3 - segments_length(right)
+            if room < 8:
+                left = left[:2]  # a remote cut down to a few letters says nothing; the info screen has it
+            else:
+                left[4] = (shorten(left[4][0], room), left[4][1])
+        over = segments_length(left) + 3 + segments_length(right) - width
         if over > 0:
-            right[1] = (right[1][0][:max(len(right[1][0]) - over, 0)], right[1][1])
+            keep = len(right[1][0]) - over
+            right[1] = (shorten(right[1][0], keep) if keep >= 3 else "", right[1][1])
         while len(left) > 1 and segments_length(left) + segments_length(right) > width:
             left.pop()
         return styled(spread(left, right, width), BAR_BACKGROUND)

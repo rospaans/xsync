@@ -38,6 +38,34 @@ def test_the_screen_stays_alive_while_rsync_runs(hub):
     assert hub.while_waiting(project, 14) is True          # Esc asks for the sync to be cancelled
 
 
+
+def test_moving_around_works_while_a_sync_runs(hub, tmp_path):
+    alpha = hub.projects[0]
+    beta = hub.register(make_project_folder(tmp_path / "work" / "beta", "host:projects/beta/"))
+    keys = iter(["down", "o", "s", "b", "up", "w", None])
+    hub.screen.read_key = lambda timeout: next(keys)
+    assert hub.while_waiting(alpha, 1.0) is False         # nothing here cancels the sync
+    assert hub.view is None and hub.selected == hub.projects.index(alpha)
+    assert any("s is not run while alpha is busy" in line for line in beta.log)   # opened, then refused
+    assert "w is not run while alpha is busy" in hub.notes[0]   # in the overview, back from beta
+    keys = iter(["q", None])
+    hub.screen.read_key = lambda timeout: next(keys)
+    assert hub.while_waiting(alpha, 2.0) is True and hub.quitting   # q cancels, then quits
+
+
+def test_another_projects_config_can_be_edited_while_a_sync_runs(hub, tmp_path, monkeypatch):
+    alpha = hub.projects[0]
+    beta = hub.register(make_project_folder(tmp_path / "work" / "beta", "host:projects/beta/"))
+    edited = fake_editor(tmp_path, monkeypatch, "host:projects/elsewhere/")
+    hub.activate(alpha)                                    # alpha's rsync is running
+    hub.selected = hub.projects.index(alpha)
+    keys = iter(["e", "down", "e", None])
+    hub.screen.read_key = lambda timeout: next(keys)
+    assert hub.while_waiting(alpha, 1.0) is False
+    assert edited.read_text().splitlines() == [str(beta.root / ".xsync.toml")]   # not alpha's: it is busy
+    assert beta.remote == "host:projects/elsewhere/" and hub.notes == ["beta: config reloaded"]
+    assert run_state.output is alpha                       # alpha's rsync output still lands in alpha's list
+
 def test_only_the_project_on_screen_prints_its_lines(hub, capsys):
     project = hub.projects[0]
     hub.activate(project)
@@ -419,6 +447,11 @@ def test_watched_projects_stand_out_in_the_overview(hub, tmp_path):
     assert " WATCHING " in alpha_row and " WATCHING " not in beta_row
     assert alpha_row.rstrip().endswith("WATCHING")              # at the end, after the changes count
     assert alpha_row.index("6 changes") < alpha_row.index("WATCHING")
+    alpha.panel.state = "syncing…  ·  71s, Esc cancels"
+    for width in (40, 50, 60, 80):                             # narrow: the badge stays, with room around it
+        row = visible(hub.table_rows(width)[0])
+        assert len(row) == width and row.rstrip().endswith(" WATCHING")
+        assert "   ●" in row
     alpha.observer = None
 
 

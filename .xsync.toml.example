@@ -24,7 +24,7 @@ exclude = [
 # A local path instead of SSH (replaces the remote line above)
 # remote = "/Volumes/your-volume/your-project/"
 
-# Seconds watch mode collects changes before sending them (default 2)
+# Longest wait, in seconds, before watch mode sends changes that keep coming (default 2)
 # interval = 2
 
 # Extra rsync flags. This set is for a server folder on a network share (CIFS/SMB)

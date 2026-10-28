@@ -320,6 +320,25 @@ def test_run_rsync_does_not_wait_for_a_background_process_holding_the_pipe(capsy
     assert "started" in capsys.readouterr().out
 
 
+
+def test_keys_are_answered_while_rsync_keeps_printing(monkeypatch):
+    """A first sync prints a line per file without pausing; the screen must not wait for it to stop."""
+    calls = []
+
+    class Recorder(output_module.Printer):
+        def line(self, text):
+            pass
+
+        def waiting(self, seconds):
+            calls.append(seconds)
+            return len(calls) >= 3  # as if Esc was pressed on the third look
+
+    monkeypatch.setattr(run_state, "output", Recorder())
+    started = time.monotonic()
+    rc = rsync_module.run_rsync(["sh", "-c", "while true; do echo line; done"])
+    assert rc == rsync_module.CANCELLED
+    assert len(calls) == 3 and time.monotonic() - started < 5
+
 @needs_rsync
 def test_temporary_files_stay_out_of_the_project(project, tmp_path, monkeypatch):
     scratch = tmp_path / "system-temp"

@@ -322,7 +322,7 @@ exclude = [
 # A local path instead of SSH (replaces the remote line above)
 # remote = "/Volumes/your-volume/your-project/"
 
-# Seconds watch mode collects changes before sending them (default 2)
+# Longest wait, in seconds, before watch mode sends changes that keep coming (default 2)
 # interval = 2
 
 # Extra rsync flags. This set is for a server folder on a network share (CIFS/SMB)
@@ -334,7 +334,7 @@ exclude = [
 |---|---|---|
 | `remote` | yes | Where to sync to. |
 | `exclude` | no | Files and folders to skip, in rsync's pattern syntax. `checkpoints/` skips every folder of that name, at any depth; `/checkpoints/` only the one at the top of the project. |
-| `interval` | no | Seconds watch mode collects changes before sending them. Default 2. |
+| `interval` | no | The longest watch mode waits before sending changes that keep coming, in seconds. A change is normally sent 0.3 seconds after things go quiet. Default 2. |
 | `rsync_args` | no | A list of extra flags passed to rsync, placed after xsync's own so they can override them. |
 
 The `remote` field is an SSH target in the form `host:/path/`, where `host` is an alias from `~/.ssh/config`. `user@host:/path/` also works.
@@ -453,7 +453,8 @@ Each row is a project: its name, where it syncs to, what it is doing, how many c
 |---|---|
 | `↑` `↓` | Move the highlight (`k` and `j` work too). |
 | `o` | Open the highlighted project (Enter and `→` work too). |
-| `s` | Sync the highlighted project now. |
+| `s` | Sync the highlighted project: send what changed here since the last sync. |
+| `m` | Mirror (full sync) the highlighted project: compare every file with the server. |
 | `w` | Switch watch mode on or off for the highlighted project. |
 | `c` | Compare the highlighted project with the server, changing nothing. |
 | `a` | Add a project: type, paste or drag its folder and press Enter (`.` is the folder you started xsync in; Tab completes folder names; Esc cancels). A folder without a `.xsync.toml` gets a starter one, which opens in your editor so you can set `remote`. |
@@ -513,8 +514,9 @@ The top of the screen stays fixed; changes scroll below it. On a narrow terminal
 
 | Key | Action |
 |---|---|
-| `s` | Sync the whole project now. |
-| `w` | Switch watch mode on or off. Switching it on does a full sync first, then sends changes as you make them. |
+| `s` | Sync: send what changed here since the last sync. Quick, because the server is not read (see [Sync and mirror](#sync-and-mirror)). |
+| `m` | Mirror (full sync): compare every file with the server and make it match. Slower; catches changes made on the server. |
+| `w` | Switch watch mode on or off. Switching it on syncs what changed since the last sync first, then sends changes as you make them. |
 | `c` | Compare: list what differs between the project and the server, without changing anything. |
 | `f` | Sync one file or folder. Type, paste or drag a path into the terminal and press Enter (Esc cancels). A folder is mirrored like a full sync, limited to that folder. |
 | `r` | Check the connection now and, when it is back, send what was queued. |
@@ -550,9 +552,17 @@ After a compare the lines end in "(not synced)": they show what a sync would do.
 
 xsync uses the terminal's alternate screen, like an editor does: when you quit, the terminal shows what was there before, and xsync's lists are gone.
 
+### Sync and mirror
+
+`s` is quick because it never reads the server. xsync keeps a record of every file it sent (its size and modification time when it was sent) in `~/.config/xsync/sent/`, one per project and remote, and a sync only sends what differs from that record. Watch mode keeps the record up to date as it sends.
+
+The record cannot know about changes made on the server itself: a file someone edited or deleted there stays that way after `s`. `m` (mirror) checks every file against the server, makes it match, and writes the record anew; use it when the server may have been changed by someone or something else. `c` compares the same way, without changing anything.
+
+When a project has 5,000 files or more to keep in sync, a sync says which folders hold most of them, before rsync starts. A virtual environment or a data folder that is not excluded usually shows up this way.
+
 ### Watch mode
 
-Press `w`. xsync does a full sync and then sends changes as they happen, in batches collected over the `interval` (2 seconds by default):
+Press `w`. xsync syncs what changed since the last sync and then sends changes as they happen: 0.3 seconds after things go quiet, so a save arrives almost at once, and while changes keep coming (a `git checkout`, say) in batches at most `interval` apart (2 seconds by default):
 
 ```
  WATCHING   my_project  →   SSH  myhost:/data/projects/you/my_project/           ● in sync    4 changes   last 15:26:41
@@ -566,15 +576,18 @@ Press `w`. xsync does a full sync and then sends changes as they happen, in batc
 - **Deleted files** are removed from the remote. A folder that disappears locally is removed too, but only once it is empty on the remote, so files that exist only on the server are never touched.
 - **Excluded paths** are ignored in both directions: changes to them are not sent, and they are never deleted on the remote. A path you add to `exclude` while watching is skipped from then on, but copies already on the remote stay there; xsync lists the new patterns as a reminder, and removing those copies is up to you.
 - **Files still being written**, such as a download or a growing log, are not sent over and over. A file that has changed again by the very next batch after it was sent waits until it has been unchanged for 3 seconds (the status says `waiting for N file(s) still being written`). One that never stops changing is still sent once a minute. A file you save again a few seconds later is sent right away.
-- **Switching watch off** stops sending. Switching it on again starts with a full sync, so nothing is missed. This is useful around a `git checkout` or a large refactor.
+- **Switching watch off** stops sending. Switching it on again first sends whatever changed meanwhile, so nothing is missed. This is useful around a `git checkout` or a large refactor.
 - **After a burst** of 100 or more changes, such as a coding agent rewriting many files or a branch switch, xsync waits until things have been quiet for a few seconds and then checks the folders that were touched against the server, sending or deleting whatever does not match. When very many files change at once the system's file watcher can miss some, and this check catches them. You see it as `checked N folder(s) after a burst`.
 
 ### While a sync runs
 
-xsync does one thing at a time, so keys other than the ones below wait until the running sync is done. After three seconds the status shows how long it has been running, for example `syncing…  ·  12s, Esc cancels`.
+xsync runs one sync at a time. After three seconds the status shows how long it has been running, for example `syncing…  ·  12s, Esc cancels`. Meanwhile:
 
-- **Esc** cancels the running sync. In watch mode this also switches watch off for that project; switch it on again to catch up with a full sync.
-- **The scroll keys** keep working.
+- **Esc** cancels the running sync. In watch mode this also switches watch off for that project; switch it on again to catch up.
+- **Moving around** keeps working: the overview, opening another project, going back, and scrolling.
+- **Anything that stays on this computer** works too: editing, adding or forgetting another project, help, problems, and clearing a list. The busy project's own config can be edited once its sync is done.
+- **Keys that run rsync** (sync, watch, compare and so on) are not run; a note says which project is busy. Press them again once it is done.
+- **q** cancels the running sync and quits.
 
 A sync that seems stuck is usually waiting on the server: a full disk, a stalled network share, or a dropped connection that has not timed out yet.
 
@@ -587,9 +600,10 @@ The terminal tab title shows the project and state, so you can see it when the t
 ## How it works
 
 - **Compare** (`c`): the same rsync run as a full sync with `--dry-run`, so it reports exactly what a sync would do.
-- **Full sync** (`s`): invokes `rsync -az --delete` over SSH with the exclude list. The remote becomes an exact mirror of the local project, minus excluded paths.
+- **Sync** (`s`): lists the project's files here (names, sizes and modification times; no file is read) and compares them with a record of what was last sent. Only new and changed files are sent, and files deleted here are deleted on the remote. Without a record, the first time or after changing `remote`, it is a mirror.
+- **Mirror** (`m`): invokes `rsync -az --delete` over SSH with the exclude list. The remote becomes an exact mirror of the local project, minus excluded paths. Afterwards the record is written anew.
 - **File or folder sync** (`f`): a file is transferred to the same relative path under the remote root, creating missing folders. A folder is mirrored like a full sync, limited to that folder.
-- **Watch** (`w`): one full sync, then pushes changed files in batches and removes deleted files from the remote. Failed batches are retried when the connection returns.
+- **Watch** (`w`): one sync, then pushes changed files in batches and removes deleted files from the remote. Failed batches are retried when the connection returns.
 - **SSH options**: over SSH, xsync runs rsync with `ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3`, so it never waits for a password and notices a dead connection. If you set `RSYNC_RSH`, or pass your own `-e` in `rsync_args`, yours is used instead.
 
 ## Optional: local paths and mounted volumes
