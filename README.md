@@ -45,7 +45,7 @@ xsync remembers your projects. Inside a project folder it opens that project; an
 
 A typical setup: a coding agent edits the project inside a devcontainer on your laptop, and xsync, running outside the container, mirrors every edit to the cluster within seconds. Jobs on the cluster use that copy together with data the agent can never reach.
 
-![Write locally, run on the cluster: the repo on the laptop is edited by a coding agent in a devcontainer, and xsync mirrors it one way over SSH to a project share on the cluster](docs/xsync_workflow.svg)
+![Write locally, run on the cluster: the repo on the laptop is edited by a coding agent in a devcontainer, and xsync mirrors it one way over SSH to a project share on the cluster](docs/xsync-workflow-dark.svg)
 
 ## Requirements
 
