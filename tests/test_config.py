@@ -113,3 +113,12 @@ def test_a_path_that_only_fits_from_home_is_suggested(tmp_path, monkeypatch):
     assert config_module.from_home("Nothing/", elsewhere) is None
     assert config_module.from_home("~/Nothing", elsewhere) is None   # already from home
     assert config_module.from_home("Nothing", home) is None          # started in the home folder itself
+
+
+def test_on_disk_gives_the_spelling_on_disk(tmp_path):
+    (tmp_path / "Work" / "project").mkdir(parents=True)
+    other = tmp_path / "WORK" / "Project"
+    if not other.exists():
+        pytest.skip("needs a case-insensitive disk")
+    assert config_module.on_disk(other) == tmp_path.resolve() / "Work" / "project"
+    assert config_module.on_disk(other / "missing") == tmp_path.resolve() / "Work" / "project" / "missing"

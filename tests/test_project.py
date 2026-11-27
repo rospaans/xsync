@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 import xsync
-from xsync import config as config_module, project as project_module, remote as remote_module
-from helpers import EXCLUDES, REPO, RSYNC, fake_editor, make_project_folder, needs_gnu_rsync, needs_rsync, run_ticks, run_ticks_until, tree, write_config
+from xsync import app as app_module, config as config_module, project as project_module, remote as remote_module
+from helpers import EXCLUDES, REPO, RSYNC, FakeScreen, fake_editor, make_project_folder, needs_gnu_rsync, needs_rsync, run_ticks, run_ticks_until, tree, write_config
 
 
 @pytest.mark.parametrize("config, expected", [
@@ -137,6 +137,31 @@ def test_watch_sends_edits_and_deletes(watched):
     assert tree(dst) == {"a.txt"}
     assert not (dst / "new").exists()                      # the emptied folder is gone too
     assert not any("! " in line for line in project.log)
+
+
+@needs_gnu_rsync
+def test_a_project_known_under_another_spelling_still_sees_its_changes(hub):
+    """~/Documents/Projects for ~/Documents/projects: the watcher reports the spelling on disk."""
+    pytest.importorskip("watchdog")
+    alpha = hub.projects[0]
+    other = Path(str(alpha.root).replace("/work/", "/WORK/"))
+    if not other.exists():
+        pytest.skip("needs a case-insensitive disk")
+    assert hub.register(other) is alpha                     # one folder, one project
+    config_module.save_registry(hub.registry, [other, alpha.root])
+    app = app_module.App(hub.registry, screen=FakeScreen())
+    try:
+        assert [project.root for project in app.projects] == [alpha.root]
+        project = app.projects[0]
+        project.interval = 0.2
+        project.start_watch()
+        time.sleep(0.5)                                     # let the watcher settle
+        (project.root / "a.txt").write_text("changed")
+        run_ticks(project, 2)
+        assert (Path(project.remote) / "a.txt").read_text() == "changed"
+    finally:
+        for project in app.projects:
+            project.close()
 
 
 def test_a_burst_leaves_the_remote_identical(watched):

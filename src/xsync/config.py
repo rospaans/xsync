@@ -7,6 +7,7 @@ import shlex
 import sys
 import tempfile
 import tomllib
+import unicodedata
 from pathlib import Path
 
 
@@ -57,6 +58,32 @@ def find_root(start: Path) -> Path | None:
         if (directory / ".xsync.toml").exists():
             return directory
     return None
+
+
+def on_disk(path: Path) -> Path:
+    """The absolute path, spelled the way the disk spells it.
+
+    On a case-insensitive disk (the macOS default) ~/Documents/Projects opens
+    ~/Documents/projects too, and resolve() keeps whichever was typed. The file
+    watcher reports the spelling on disk, so a project known under another
+    spelling would never recognise its own changes. A part that cannot be
+    listed, or that does not exist, is kept as given.
+    """
+    path = path.resolve()
+    spelled = Path(path.anchor)
+    parts = path.parts[1:]
+    for index, part in enumerate(parts):
+        try:
+            names = os.listdir(spelled)
+        except OSError:
+            return spelled.joinpath(*parts[index:])
+        if part not in names:
+            wanted = unicodedata.normalize("NFC", part).casefold()
+            matches = [name for name in names if unicodedata.normalize("NFC", name).casefold() == wanted]
+            if len(matches) == 1:
+                part = matches[0]
+        spelled /= part
+    return spelled
 
 
 def write_temp_file(kind: str, entries: list[str]) -> Path:

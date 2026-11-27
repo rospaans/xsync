@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import STARTER_CONFIG, cannot_read, clean_path, complete_path, find_root, from_home, load_registry, load_settings, save_registry, save_settings
+from .config import STARTER_CONFIG, cannot_read, clean_path, complete_path, find_root, from_home, load_registry, on_disk, load_settings, save_registry, save_settings
 from .output import Printer, clock, emit, paint, state, warn
 from .project import Project
 from . import update
@@ -55,7 +55,9 @@ class App:
         self._resized = False  # set by the resize signal; the redraw happens in the loop
         self._last_dots = time.monotonic()  # when the watch-mode badge last moved on
         self.quitting = False  # q was pressed during a sync: it was cancelled, and the loop stops
-        self.projects = [Project(root, self) for root in load_registry(registry)]
+        # Under the spelling on disk, which the file watcher reports; two spellings of one folder are one project
+        roots = dict.fromkeys(on_disk(root) for root in load_registry(registry))
+        self.projects = [Project(root, self) for root in roots]
         self.sort()
 
     # --- projects
@@ -69,7 +71,7 @@ class App:
 
     def register(self, root: Path) -> Project:
         """Remember a project (if it is new) and return it."""
-        root = root.resolve()
+        root = on_disk(root)
         for project in self.projects:
             if project.root == root:
                 return project
