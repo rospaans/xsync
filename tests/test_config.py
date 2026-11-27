@@ -115,6 +115,18 @@ def test_a_path_that_only_fits_from_home_is_suggested(tmp_path, monkeypatch):
     assert config_module.from_home("Nothing", home) is None          # started in the home folder itself
 
 
+def test_find_root_passes_over_a_starter_config_further_up(tmp_path):
+    (tmp_path / ".xsync.toml").write_text(config_module.STARTER_CONFIG)   # never set up
+    project = tmp_path / "work" / "project"
+    (project / "deep").mkdir(parents=True)
+    assert config_module.find_root(project / "deep") is None
+    assert config_module.find_root(tmp_path) == tmp_path                   # the folder itself still counts
+    (project / ".xsync.toml").write_text(config_module.STARTER_CONFIG)
+    assert config_module.find_root(project) == project
+    (tmp_path / ".xsync.toml").write_text('remote = "host:somewhere/"\n')  # once set up, it counts again
+    assert config_module.find_root(tmp_path / "work") == tmp_path
+
+
 def test_on_disk_gives_the_spelling_on_disk(tmp_path):
     (tmp_path / "Work" / "project").mkdir(parents=True)
     other = tmp_path / "WORK" / "Project"

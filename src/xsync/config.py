@@ -53,9 +53,15 @@ exclude = [
 
 
 def find_root(start: Path) -> Path | None:
-    """Walk up from start, looking for the folder that holds .xsync.toml."""
+    """Walk up from start, looking for the folder that holds .xsync.toml.
+
+    Further up, a config that was never set up (its remote still the placeholder)
+    is passed over: a stray starter in, say, ~/Documents would otherwise take in
+    every folder below it.
+    """
     for directory in [start, *start.parents]:
-        if (directory / ".xsync.toml").exists():
+        config = directory / ".xsync.toml"
+        if config.exists() and (directory == start or not is_untouched_starter(config)):
             return directory
     return None
 
@@ -84,6 +90,14 @@ def on_disk(path: Path) -> Path:
                 part = matches[0]
         spelled /= part
     return spelled
+
+
+def is_untouched_starter(config: Path) -> bool:
+    """Whether a .xsync.toml still has the starter's placeholder remote."""
+    try:
+        return tomllib.loads(config.read_text()).get("remote") == PLACEHOLDER_REMOTE
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
 
 
 def write_temp_file(kind: str, entries: list[str]) -> Path:
